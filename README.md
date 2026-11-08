@@ -1,28 +1,26 @@
 # cfebms
 
-![CFE BMS battery monitoring](docs/images/cfebms-banner.png)
+![CFE BMS battery monitoring](https://raw.githubusercontent.com/andrevza/cfebms/main/docs/images/cfebms-banner.png)
 
-`cfebms` is a read-only TCP-to-MQTT service for monitoring CFE lithium battery
-systems. The currently supported target is the **CFE-5100S**; compatibility
-with other CFE models has not been established. It publishes decoded battery
-telemetry and Home Assistant MQTT discovery entities.
+CFE BMS brings battery data from supported CFE lithium batteries into Home
+Assistant. It currently supports the **CFE-5100S**.
 
-The service recognizes 19-, 35-, 73-, and 97-byte CFE frames, validates
-CRC-16/MODBUS, handles fragmented and concatenated TCP reads, and echoes only
-the recognized 19-byte heartbeat. It reconnects after connection loss,
-reports stale data, and shuts down cleanly. SOC, SOH, pack measurements,
-capacity and energy totals, cell measurements, limits, temperatures, and
-operating state are published where the reference decoder defines them. SOC
-is read from SUMMARY frames. No battery configuration, firmware, or control
-commands are sent.
+- Monitors the battery over TCP in read-only mode.
+- Publishes telemetry to MQTT and adds sensors to Home Assistant through
+  automatic MQTT discovery.
+- Reports SOC, SOH, pack voltage and current, individual cell voltages,
+  temperatures, and operating status.
+- Reconnects automatically after communication interruptions.
 
-Telemetry field mappings were ported from the working CFE-5100S decoder used
-during development. Sanitized telemetry captures are not included, so the
-automated protocol tests use synthetic frames; see
-[`docs/PROTOCOL.md`](docs/PROTOCOL.md) and
-[`docs/PROTOCOL_RESEARCH.md`](docs/PROTOCOL_RESEARCH.md) for mappings and
-verification limits. Remaining evidence gaps are listed in
-[`docs/OPEN_QUESTIONS.md`](docs/OPEN_QUESTIONS.md).
+Configure Home Assistant's MQTT integration to use the same broker and keep
+MQTT discovery enabled.
+
+## Documentation
+
+- [Installation, configuration, and troubleshooting](https://github.com/andrevza/cfebms/blob/main/DOCS.md)
+- [Implemented protocol behavior](https://github.com/andrevza/cfebms/blob/main/docs/PROTOCOL.md)
+- [Decoder mappings and verification limits](https://github.com/andrevza/cfebms/blob/main/docs/PROTOCOL_RESEARCH.md)
+- [Open protocol questions](https://github.com/andrevza/cfebms/blob/main/docs/OPEN_QUESTIONS.md)
 
 ## Home Assistant App
 
@@ -31,10 +29,6 @@ Add `https://github.com/andrevza/cfebms` under **Settings → Apps → App store
 MQTT broker in the App configuration. The App package targets `aarch64` and
 `amd64`. The repository must be available on GitHub for Supervisor to install
 it; installation in a live Supervisor instance has not yet been verified.
-Configure Home Assistant's MQTT integration for the same broker and keep MQTT
-discovery enabled.
-See [`DOCS.md`](DOCS.md) for setup, configuration, upgrade, logging, and
-troubleshooting details.
 
 ## Standalone Docker Compose
 
@@ -70,13 +64,14 @@ docker run --rm cfebms decode --hex "68 01 0c 00 01 b0 84 57 01 0a 01 00 00 00 0
 docker run --rm -v "$PWD/captures:/captures:ro" cfebms decode --file /captures/capture.bin --file-format raw
 ```
 
-Review [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current module
-boundaries and [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for implemented framing
-and decoding behavior. Development guidance is in [`AGENTS.md`](AGENTS.md).
+Review [the architecture notes](https://github.com/andrevza/cfebms/blob/main/docs/ARCHITECTURE.md)
+and [development guidance](https://github.com/andrevza/cfebms/blob/main/AGENTS.md)
+for more detail.
 
 ## License
 
 Copyright (C) 2026 Andre van der Walt.
 
 `cfebms` is licensed under the GNU General Public License v3.0 only
-(`GPL-3.0-only`). See the complete terms in [`LICENSE`](LICENSE).
+(`GPL-3.0-only`). See the complete terms in
+[`LICENSE`](https://github.com/andrevza/cfebms/blob/main/LICENSE).
