@@ -76,7 +76,7 @@ and decoding behavior. Development guidance is in [`AGENTS.md`](AGENTS.md).
 
 ## License
 
-No license has been selected for `cfebms`. Until a license is added, the
-project should not be treated as granting permission to reuse or redistribute
-its source. The `bmspace` implementation is a separate GPL-3.0 project; no
-bmspace source code is included here.
+Copyright (C) 2026 Andre van der Walt.
+
+`cfebms` is licensed under the GNU General Public License v3.0 only
+(`GPL-3.0-only`). See the complete terms in [`LICENSE`](LICENSE).
