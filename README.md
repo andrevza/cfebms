@@ -1,6 +1,6 @@
 # cfebms
 
-![CFE BMS battery monitoring](https://raw.githubusercontent.com/andrevza/cfebms/main/docs/images/cfebms-banner.png)
+![CFE BMS battery monitoring](https://raw.githubusercontent.com/andrevza/cfebms/main/docs/images/cfebms-readme.png)
 
 CFE BMS brings battery data from supported CFE lithium batteries into Home
 Assistant. It currently supports the **CFE-5100S**.
