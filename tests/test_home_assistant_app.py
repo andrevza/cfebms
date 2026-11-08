@@ -19,7 +19,7 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
     assert manifest["name"] == "CFE BMS"
     assert manifest["slug"] == "cfe_bms"
     assert manifest["description"] == "CFE Battery Management System"
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.1.1"
     assert manifest["url"] == "https://github.com/andrevza/cfebms"
     assert {"aarch64", "amd64"}.issubset(manifest["arch"])
 
@@ -72,6 +72,9 @@ def test_repository_metadata_points_to_cfebms() -> None:
 def test_build_and_icon_metadata_cover_requested_app_platforms() -> None:
     build = yaml.safe_load((ROOT / "build.yaml").read_text())
     assert set(build["build_from"]) == {"aarch64", "amd64"}
+    assert set(build["build_from"].values()) == {
+        "ghcr.io/home-assistant/base-python:3.12-alpine3.24"
+    }
     icon = (ROOT / "icon.png").read_bytes()
     assert icon[:8] == b"\x89PNG\r\n\x1a\n"
     assert struct.unpack(">II", icon[16:24]) == (512, 512)
@@ -131,7 +134,9 @@ def test_app_entrypoint_executes_service_and_loads_supervisor_options(tmp_path, 
 def test_runtime_container_uses_supervisor_wrapper() -> None:
     dockerfile = (ROOT / "Dockerfile").read_text()
     run_script = (ROOT / "run.sh").read_text()
-    assert 'ENTRYPOINT ["/run.sh"]' in dockerfile
-    assert 'CMD ["service"]' in dockerfile
-    assert dockerfile.rstrip().endswith('CMD ["service"]')
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert 'CMD ["/run.sh", "service"]' in dockerfile
+    assert 'ENTRYPOINT ["/run.sh"]' not in dockerfile
+    assert "adduser -D -h /home/cfebms -u 10001 cfebms" in dockerfile
+    assert 'entrypoint: ["/run.sh"]' in compose
     assert "exec python -m cfebms.supervisor \"$@\"" in run_script

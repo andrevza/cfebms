@@ -60,8 +60,8 @@ Build and use the diagnostic CLI with a frame or a local capture file:
 
 ```sh
 docker build -t cfebms .
-docker run --rm cfebms decode --hex "68 01 0c 00 01 b0 84 57 01 0a 01 00 00 00 00 04 00 c3 16"
-docker run --rm -v "$PWD/captures:/captures:ro" cfebms decode --file /captures/capture.bin --file-format raw
+docker run --rm --entrypoint /run.sh cfebms decode --hex "68 01 0c 00 01 b0 84 57 01 0a 01 00 00 00 00 04 00 c3 16"
+docker run --rm --entrypoint /run.sh -v "$PWD/captures:/captures:ro" cfebms decode --file /captures/capture.bin --file-format raw
 ```
 
 Review [the architecture notes](https://github.com/andrevza/cfebms/blob/main/docs/ARCHITECTURE.md)

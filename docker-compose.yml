@@ -4,6 +4,7 @@ services:
       context: .
       target: runtime
     image: cfebms:local
+    entrypoint: ["/run.sh"]
     command: ["service"]
     restart: unless-stopped
     env_file:

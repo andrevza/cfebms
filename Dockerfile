@@ -11,7 +11,11 @@ COPY src ./src
 COPY run.sh /run.sh
 
 RUN python -m pip install --no-cache-dir . \
-    && useradd --create-home --uid 10001 cfebms \
+    && if [ -f /etc/alpine-release ]; then \
+         adduser -D -h /home/cfebms -u 10001 cfebms; \
+       else \
+         useradd --create-home --uid 10001 cfebms; \
+       fi \
     && chmod 755 /run.sh \
     && chown -R cfebms:cfebms /app
 
@@ -22,7 +26,7 @@ FROM base AS test
 USER root
 RUN python -m pip install --no-cache-dir '.[dev]'
 COPY tests ./tests
-COPY config.yaml repository.yaml build.yaml Dockerfile run.sh DOCS.md icon.png logo.png ./
+COPY config.yaml repository.yaml build.yaml Dockerfile run.sh docker-compose.yml DOCS.md icon.png logo.png ./
 COPY docs/images/cfebms-banner.png ./docs/images/cfebms-banner.png
 RUN chown -R cfebms:cfebms /app
 USER cfebms
@@ -31,5 +35,4 @@ ENTRYPOINT ["python", "-m", "pytest"]
 
 FROM base AS runtime
 
-ENTRYPOINT ["/run.sh"]
-CMD ["service"]
+CMD ["/run.sh", "service"]
