@@ -1,0 +1,930 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import signal
+
+import cfebms.service as service_module
+from cfebms.service import reconnect_loop, run_service
+from cfebms.config import Settings
+from cfebms.frames import crc16_modbus
+from cfebms.protocol import OBSERVED_INITIAL_SEQUENCE
+from cfebms.service import BatteryService
+
+
+class FakeWriter:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def wait_closed(self) -> None:
+        return None
+
+
+def test_connection_loop_retries_after_failure_and_shuts_down() -> None:
+    stop = asyncio.Event()
+    attempts = 0
+    writer = FakeWriter()
+
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("simulated offline endpoint")
+        return object(), writer
+
+    async def session(reader, current_writer):
+        assert current_writer is writer
+        stop.set()
+
+    asyncio.run(reconnect_loop(connect, session, stop=stop, retry_delay=0.001))
+    assert attempts == 2
+    assert writer.closed
+
+
+def test_connection_loop_logs_exception_type_details_and_retry(caplog) -> None:
+    class EmptyRefusal(ConnectionRefusedError):
+        def __str__(self):
+            return ""
+
+    stop = asyncio.Event()
+    attempts = 0
+    writer = FakeWriter()
+
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise EmptyRefusal()
+        return object(), writer
+
+    async def session(reader, current_writer):
+        stop.set()
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(reconnect_loop(connect, session, stop=stop, retry_delay=0.001))
+
+    assert "Battery TCP connection failed: EmptyRefusal: no additional details" in caplog.text
+    assert "EmptyRefusal: no additional details" in caplog.text
+    assert "consecutive failures: 1). Retrying in 0.001 seconds." in caplog.text
+
+
+def test_session_echoes_only_the_recognized_captured_heartbeat(caplog) -> None:
+    class Reader:
+        chunks = [OBSERVED_INITIAL_SEQUENCE, b""]
+
+        async def read(self, size):
+            return self.chunks.pop(0)
+
+    class Writer:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+        async def wait_closed(self):
+            return None
+
+    class Publisher:
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+        def publish_values(self, values):
+            pass
+
+    async def run():
+        service = BatteryService(Settings(battery_host="battery.invalid"), Publisher())
+        writer = Writer()
+        try:
+            await service._session(Reader(), writer)
+        except ConnectionError:
+            pass
+        return writer.writes
+
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(run()) == [OBSERVED_INITIAL_SEQUENCE]
+    assert "First CRC-valid CFE heartbeat received" in caplog.text
+    assert "First CFE heartbeat acknowledged" in caplog.text
+
+
+def test_signal_shutdown_is_idempotent_for_sigterm_and_sigint(caplog) -> None:
+    class Publisher:
+        pass
+
+    async def run(signum):
+        service = BatteryService(Settings(battery_host="battery.invalid"), Publisher())
+        writer = FakeWriter()
+        service._writer = writer
+        service.handle_signal(signum)
+        service.handle_signal(signum)
+        return service, writer
+
+    with caplog.at_level(logging.INFO):
+        term_service, term_writer = asyncio.run(run(signal.SIGTERM))
+        int_service, int_writer = asyncio.run(run(signal.SIGINT))
+    assert term_service.stop.is_set() and int_service.stop.is_set()
+    assert term_writer.closed and int_writer.closed
+    assert caplog.text.count("Shutdown requested (SIGTERM)") == 1
+    assert caplog.text.count("Shutdown requested (SIGINT)") == 1
+
+
+def test_disconnected_shutdown_logs_disconnect_once(caplog) -> None:
+    async def run():
+        service = BatteryService(Settings(battery_host="battery.invalid"), object())
+        service.request_shutdown("SIGINT")
+        service.log_shutdown_disconnect_if_needed()
+        service.log_shutdown_disconnect_if_needed()
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run())
+    assert caplog.text.count("CFE battery disconnected") == 1
+
+
+def test_reconnect_loop_does_not_retry_after_shutdown_during_connect() -> None:
+    stop = asyncio.Event()
+    attempts = 0
+
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        stop.set()
+        raise ConnectionRefusedError("stopped")
+
+    async def session(reader, writer):
+        raise AssertionError("session must not start after shutdown")
+
+    asyncio.run(reconnect_loop(connect, session, stop=stop, retry_delay=0.001))
+    assert attempts == 1
+
+
+def test_periodic_info_does_not_shorten_battery_retry_delay() -> None:
+    stop = asyncio.Event()
+    attempts = 0
+    second_attempt_at = None
+    start = None
+
+    async def connect():
+        nonlocal attempts, second_attempt_at, start
+        attempts += 1
+        if attempts == 1:
+            start = asyncio.get_running_loop().time()
+            raise ConnectionRefusedError("offline")
+        second_attempt_at = asyncio.get_running_loop().time()
+        return object(), FakeWriter()
+
+    async def session(reader, writer):
+        stop.set()
+
+    asyncio.run(
+        reconnect_loop(
+            connect,
+            session,
+            stop=stop,
+            retry_delay=0.06,
+            on_periodic_info=lambda: None,
+            seconds_until_periodic_info=lambda: 0.005,
+        )
+    )
+    assert attempts == 2
+    assert second_attempt_at - start >= 0.05
+
+
+def test_three_failed_connections_reset_counter_after_success(caplog) -> None:
+    stop = asyncio.Event()
+    attempts = 0
+    connected = 0
+
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 3:
+            raise ConnectionRefusedError("offline")
+        return object(), FakeWriter()
+
+    async def session(reader, writer):
+        stop.set()
+
+    def on_connected():
+        nonlocal connected
+        connected += 1
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            reconnect_loop(
+                connect,
+                session,
+                stop=stop,
+                retry_delay=0.001,
+                on_connected=on_connected,
+            )
+        )
+
+    assert attempts == 4
+    assert connected == 1
+    assert "consecutive failures: 1). Retrying" in caplog.text
+    assert "consecutive failures: 2). Retrying" in caplog.text
+    assert "consecutive failures: 3). Retrying" in caplog.text
+
+
+def test_disconnection_starts_new_failure_sequence(caplog) -> None:
+    stop = asyncio.Event()
+    attempts = 0
+    connected = 0
+
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise ConnectionRefusedError("reconnect refused")
+        return object(), FakeWriter()
+
+    async def session(reader, writer):
+        if attempts == 1:
+            raise ConnectionError("established stream dropped")
+        stop.set()
+
+    def on_connected():
+        nonlocal connected
+        connected += 1
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            reconnect_loop(
+                connect,
+                session,
+                stop=stop,
+                retry_delay=0.001,
+                on_connected=on_connected,
+            )
+        )
+
+    assert attempts == 3
+    assert connected == 2
+    assert "connection lost or closed: ConnectionError: established stream dropped (consecutive failures: 1)" in caplog.text
+    assert "ConnectionRefusedError: reconnect refused (consecutive failures: 2)" in caplog.text
+
+
+def test_repeated_successful_reconnects_do_not_accumulate_failures(caplog) -> None:
+    stop = asyncio.Event()
+    attempts = 0
+    connected = 0
+
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        return object(), FakeWriter()
+
+    async def session(reader, writer):
+        if attempts == 3:
+            stop.set()
+        else:
+            raise ConnectionError("stream dropped")
+
+    def on_connected():
+        nonlocal connected
+        connected += 1
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(
+            reconnect_loop(
+                connect,
+                session,
+                stop=stop,
+                retry_delay=0.001,
+                on_connected=on_connected,
+            )
+        )
+
+    assert attempts == connected == 3
+    assert caplog.text.count("consecutive failures: 1)") == 2
+    assert "consecutive failures: 2)" not in caplog.text
+
+
+def test_successful_connection_shutdown_does_not_reconnect() -> None:
+    stop = asyncio.Event()
+    attempts = 0
+
+    async def connect():
+        nonlocal attempts
+        attempts += 1
+        return object(), FakeWriter()
+
+    async def session(reader, writer):
+        stop.set()
+
+    asyncio.run(reconnect_loop(connect, session, stop=stop, retry_delay=0.001))
+    assert attempts == 1
+
+
+def test_session_disconnect_resets_protocol_counters_but_keeps_latest_values() -> None:
+    class Reader:
+        async def read(self, size):
+            return b""
+
+    class Writer(FakeWriter):
+        def is_closing(self):
+            return self.closed
+
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            pass
+
+    class Publisher:
+        connected = asyncio.Event()
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+    async def run():
+        service = BatteryService(Settings(battery_host="battery.invalid"), Publisher())
+        service._session_frame_counts.update(HEARTBEAT=12, STATUS=3, SUMMARY=4, DETAIL=5)
+        service._interval_frame_counts.update(HEARTBEAT=12, STATUS=3, SUMMARY=4, DETAIL=5)
+        service._latest_soc = 61
+        service._latest_voltage = 49.68
+        previous_baseline = service.last_heartbeat_monotonic
+        try:
+            await service._session(Reader(), Writer())
+        except ConnectionError:
+            pass
+        return service, previous_baseline
+
+    service, previous_baseline = asyncio.run(run())
+    assert service._session_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service.last_heartbeat_monotonic >= previous_baseline
+    assert service._latest_soc == 61
+    assert service._latest_voltage == 49.68
+
+
+def test_reconnect_restarts_operational_heartbeat_baseline() -> None:
+    class Publisher:
+        connected = asyncio.Event()
+
+    service = BatteryService(Settings(battery_host="battery.invalid"), Publisher())
+    service._session_frame_counts.update(HEARTBEAT=6, STATUS=2, SUMMARY=3, DETAIL=4)
+    service._interval_frame_counts.update(HEARTBEAT=6, STATUS=2, SUMMARY=3, DETAIL=4)
+    service._latest_soc = 50
+    service.last_heartbeat_monotonic -= 100
+    service._on_connection_established()
+    assert service._session_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service._seconds_until_periodic_info() > 3500
+    assert service._latest_soc == 50
+
+
+def test_session_does_not_emit_legacy_telemetry_summary_info(caplog) -> None:
+    class Reader:
+        def __init__(self, frame):
+            self.chunks = [frame, b""]
+
+        async def read(self, size):
+            return self.chunks.pop(0)
+
+    class Writer(FakeWriter):
+        def is_closing(self):
+            return self.closed
+
+    class Publisher:
+        connected = asyncio.Event()
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+        def publish_values(self, values):
+            pass
+
+    frame = bytearray(73)
+    frame[0] = 0x68
+    frame[-1] = 0x16
+    frame[-3:-1] = crc16_modbus(frame[:-3]).to_bytes(2, "little")
+    async def run():
+        service = BatteryService(Settings(battery_host="battery.invalid"), Publisher())
+        try:
+            await service._session(Reader(bytes(frame)), Writer())
+        except ConnectionError:
+            pass
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run())
+    assert "First valid CFE SUMMARY frame received" in caplog.text
+    assert "Telemetry summary:" not in caplog.text
+
+
+def test_run_service_shuts_down_cleanly_without_traceback(monkeypatch, caplog) -> None:
+    class Publisher:
+        def __init__(self, settings):
+            self.shutdowns = 0
+
+        async def start(self, **kwargs):
+            return None
+
+        async def graceful_shutdown(self):
+            self.shutdowns += 1
+            logging.getLogger("cfebms.mqtt").info("Graceful shutdown complete")
+
+    class Service:
+        instance = None
+
+        def __init__(self, settings, publisher):
+            self.stop = asyncio.Event()
+            self.publisher = publisher
+            type(self).instance = self
+
+        async def run(self):
+            self.stop.set()
+
+        def handle_signal(self, signum):
+            self.stop.set()
+
+        def request_shutdown(self, reason):
+            self.stop.set()
+
+        def log_shutdown_disconnect_if_needed(self):
+            pass
+
+    monkeypatch.setattr(service_module, "MQTTPublisher", Publisher)
+    monkeypatch.setattr(service_module, "BatteryService", Service)
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run_service(Settings(battery_host="battery.invalid")))
+    assert Service.instance.publisher.shutdowns == 1
+    assert "Graceful shutdown complete" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+def test_operational_heartbeat_reports_health_counts_values_and_elapsed_interval(caplog) -> None:
+    class Publisher:
+        def __init__(self):
+            self.connected = asyncio.Event()
+            self.connected.set()
+
+    class Writer:
+        def is_closing(self):
+            return False
+
+    service = BatteryService(
+        Settings(battery_host="battery.invalid", heartbeat_log_interval_min=60),
+        Publisher(),
+    )
+    service._writer = Writer()
+    deadline = service._next_heartbeat_deadline
+    assert deadline is not None
+    now = deadline + 0.7
+    service._last_rx_monotonic = now
+    service._last_valid_telemetry_monotonic = now
+    service._session_frame_counts.update(HEARTBEAT=12, STATUS=3, SUMMARY=4, DETAIL=4)
+    service._interval_frame_counts.update(HEARTBEAT=12, STATUS=3, SUMMARY=4, DETAIL=4)
+    service._latest_soc = 7
+    service._latest_voltage = 49.68
+
+    with caplog.at_level(logging.INFO):
+        service.log_periodic_info(now=now)
+
+    assert (
+        "CFE healthy: battery connected, MQTT connected, 12 heartbeats, 3 statuses, "
+        "4 summaries, 4 detail frames, SOC=7%, voltage=49.68V (interval=3600.7s)"
+    ) in caplog.text
+    assert service._session_frame_counts["HEARTBEAT"] == 12
+    assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+
+
+def test_operational_heartbeat_is_degraded_when_telemetry_is_stale(caplog) -> None:
+    class Publisher:
+        def __init__(self):
+            self.connected = asyncio.Event()
+            self.connected.set()
+
+    class Writer:
+        def is_closing(self):
+            return False
+
+    service = BatteryService(
+        Settings(battery_host="battery.invalid", heartbeat_log_interval_min=1),
+        Publisher(),
+    )
+    service._writer = Writer()
+    deadline = service._next_heartbeat_deadline
+    assert deadline is not None
+    service._last_rx_monotonic = deadline
+    service._last_valid_telemetry_monotonic = deadline - service.settings.stale_after - 1
+
+    with caplog.at_level(logging.INFO):
+        service.log_periodic_info(now=deadline)
+
+    assert "CFE degraded: battery connected, MQTT connected" in caplog.text
+    assert "CFE healthy:" not in caplog.text
+
+
+def test_operational_heartbeat_is_unhealthy_for_stale_tcp_or_disconnected_mqtt(caplog) -> None:
+    class Publisher:
+        def __init__(self, connected):
+            self.connected = asyncio.Event()
+            if connected:
+                self.connected.set()
+
+    class Writer:
+        def is_closing(self):
+            return False
+
+    stale_tcp = BatteryService(
+        Settings(battery_host="battery.invalid", heartbeat_log_interval_min=1),
+        Publisher(connected=True),
+    )
+    stale_deadline = stale_tcp._next_heartbeat_deadline
+    assert stale_deadline is not None
+    stale_tcp._writer = Writer()
+    stale_tcp._last_rx_monotonic = stale_deadline - stale_tcp.settings.stale_after - 1
+    stale_tcp._last_valid_telemetry_monotonic = stale_deadline
+
+    mqtt_down = BatteryService(
+        Settings(battery_host="battery.invalid", heartbeat_log_interval_min=1),
+        Publisher(connected=False),
+    )
+    mqtt_deadline = mqtt_down._next_heartbeat_deadline
+    assert mqtt_deadline is not None
+    mqtt_down._writer = Writer()
+    mqtt_down._last_rx_monotonic = mqtt_deadline
+    mqtt_down._last_valid_telemetry_monotonic = mqtt_deadline
+
+    with caplog.at_level(logging.INFO):
+        stale_tcp.log_periodic_info(now=stale_deadline)
+        mqtt_down.log_periodic_info(now=mqtt_deadline)
+
+    assert "CFE unhealthy: battery stale, MQTT connected" in caplog.text
+    assert "CFE unhealthy: battery connected, MQTT disconnected" in caplog.text
+    assert "CFE healthy:" not in caplog.text
+
+
+def test_operational_heartbeat_deadline_does_not_accumulate_execution_drift(caplog) -> None:
+    class Publisher:
+        connected = asyncio.Event()
+
+        def __init__(self):
+            self.connected.set()
+
+    class Writer:
+        def is_closing(self):
+            return False
+
+    service = BatteryService(
+        Settings(battery_host="battery.invalid", heartbeat_log_interval_min=1),
+        Publisher(),
+    )
+    service._writer = Writer()
+    first_deadline = service._next_heartbeat_deadline
+    assert first_deadline is not None
+    report_at = first_deadline + 0.7
+    service._last_rx_monotonic = report_at
+    service._last_valid_telemetry_monotonic = report_at
+
+    with caplog.at_level(logging.INFO):
+        service.log_periodic_info(now=report_at)
+        assert service._next_heartbeat_deadline == first_deadline + 60
+        second_report = first_deadline + 60.2
+        service._last_rx_monotonic = second_report
+        service._last_valid_telemetry_monotonic = second_report
+        service.log_periodic_info(now=second_report)
+
+    assert "interval=60.7s" in caplog.text
+    assert "interval=59.5s" in caplog.text
+    assert service._next_heartbeat_deadline == first_deadline + 120
+
+
+def test_operational_heartbeat_zero_interval_disables_log(caplog) -> None:
+    class Publisher:
+        connected = asyncio.Event()
+
+    service = BatteryService(
+        Settings(battery_host="battery.invalid", heartbeat_log_interval_min=0),
+        Publisher(),
+    )
+    with caplog.at_level(logging.INFO):
+        service.log_periodic_info(now=service.last_heartbeat_monotonic + 24 * 60 * 60)
+    assert "CFE healthy:" not in caplog.text
+
+
+def _valid_frame(length: int, *, voltage: int | None = None, soc: int | None = None) -> bytes:
+    frame = bytearray(length)
+    frame[0] = 0x68
+    frame[-1] = 0x16
+    if length == 73:
+        if voltage is not None:
+            frame[13:15] = voltage.to_bytes(2, "little")
+        if soc is not None:
+            frame[33] = soc
+    elif length == 97 and voltage is not None:
+        frame[19:21] = voltage.to_bytes(2, "little")
+    frame[-3:-1] = crc16_modbus(frame[:-3]).to_bytes(2, "little")
+    return bytes(frame)
+
+
+def test_frame_counters_are_crc_valid_per_session_and_per_report(caplog) -> None:
+    class Reader:
+        def __init__(self, data):
+            self.chunks = [data, b""]
+
+        async def read(self, size):
+            return self.chunks.pop(0)
+
+    class Writer(FakeWriter):
+        def is_closing(self):
+            return self.closed
+
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            pass
+
+    class Publisher:
+        def __init__(self):
+            self.connected = asyncio.Event()
+            self.connected.set()
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+        def publish_values(self, values):
+            pass
+
+    async def run():
+        service = BatteryService(Settings(battery_host="battery.invalid"), Publisher())
+        snapshots = []
+        session_number = 1
+        record_frame = service._record_frame
+
+        def record(frame_type):
+            record_frame(frame_type)
+            snapshots.append(
+                (session_number, frame_type, dict(service._session_frame_counts), dict(service._interval_frame_counts))
+            )
+
+        service._record_frame = record
+
+        corrupt_summary = bytearray(_valid_frame(73, voltage=4968, soc=7))
+        corrupt_summary[-2] ^= 1
+        first_data = (
+            OBSERVED_INITIAL_SEQUENCE * 2
+            + _valid_frame(35)
+            + bytes(corrupt_summary)
+            + _valid_frame(73, voltage=4968, soc=7)
+            + _valid_frame(97, voltage=495)
+        )
+        try:
+            await service._session(Reader(first_data), Writer())
+        except ConnectionError:
+            pass
+        first_session_counts = dict(service._session_frame_counts)
+        first_interval_counts = dict(service._interval_frame_counts)
+
+        session_number = 2
+        service._on_connection_established()
+        try:
+            await service._session(
+                Reader(_valid_frame(35) + _valid_frame(73, voltage=4970, soc=8)),
+                Writer(),
+            )
+        except ConnectionError:
+            pass
+        return service, snapshots, first_session_counts, first_interval_counts
+
+    service, snapshots, first_session_counts, first_interval_counts = asyncio.run(run())
+    first_last = [item for item in snapshots if item[0] == 1][-1]
+    second_last = [item for item in snapshots if item[0] == 2][-1]
+    assert first_last[2] == {"HEARTBEAT": 2, "STATUS": 1, "SUMMARY": 1, "DETAIL": 1}
+    assert first_last[3] == first_last[2]
+    assert second_last[2] == {"HEARTBEAT": 0, "STATUS": 1, "SUMMARY": 1, "DETAIL": 0}
+    assert second_last[3] == second_last[2]
+    assert first_session_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert first_interval_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service._session_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service._latest_soc == 8
+    assert service._latest_voltage == 49.7
+    report_at = service._next_heartbeat_deadline
+    assert report_at is not None
+    with caplog.at_level(logging.INFO):
+        service.log_periodic_info(now=report_at)
+    assert "SOC=8%, voltage=49.70V" in caplog.text
+
+
+def test_silent_tcp_session_reconnects_and_resets_counts(caplog) -> None:
+    class SilentReader:
+        async def read(self, size):
+            await asyncio.Future()
+
+    class EofReader:
+        async def read(self, size):
+            return b""
+
+    class Writer(FakeWriter):
+        def is_closing(self):
+            return self.closed
+
+    class Publisher:
+        def __init__(self):
+            self.connected = asyncio.Event()
+            self.connection_down = asyncio.Event()
+
+        def publish_connection(self, connected):
+            if not connected:
+                self.connection_down.set()
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+    async def run():
+        publisher = Publisher()
+        service = BatteryService(
+            Settings(battery_host="battery.invalid", stale_after=0.03, read_timeout=1), publisher
+        )
+        attempts = 0
+
+        async def connect():
+            nonlocal attempts
+            attempts += 1
+            return (SilentReader() if attempts == 1 else EofReader()), Writer()
+
+        async def session(reader, writer):
+            try:
+                await service._session(reader, writer)
+            except ConnectionError:
+                if attempts >= 2:
+                    service.stop.set()
+                raise
+
+        with caplog.at_level(logging.WARNING):
+            await reconnect_loop(
+                connect,
+                session,
+                stop=service.stop,
+                retry_delay=0.001,
+                on_connected=service._on_connection_established,
+            )
+        return attempts, service, publisher
+
+    attempts, service, publisher = asyncio.run(run())
+    assert attempts == 2
+    assert publisher.connection_down.is_set()
+    assert "Battery connection stale: no TCP data received" in caplog.text
+    assert service._session_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+    assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+
+
+def test_valid_heartbeat_traffic_keeps_tcp_session_without_fresh_telemetry(caplog) -> None:
+    class Reader:
+        def __init__(self, service):
+            self.service = service
+            self.count = 0
+
+        async def read(self, size):
+            await asyncio.sleep(0.01)
+            self.count += 1
+            if self.count == 7:
+                self.service.stop.set()
+            return OBSERVED_INITIAL_SEQUENCE
+
+    class Writer(FakeWriter):
+        def is_closing(self):
+            return self.closed
+
+        def write(self, data):
+            pass
+
+        async def drain(self):
+            pass
+
+    class Publisher:
+        connected = asyncio.Event()
+
+        def __init__(self):
+            self.connected.set()
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+    async def run():
+        service = BatteryService(
+            Settings(battery_host="battery.invalid", stale_after=0.03, read_timeout=1), Publisher()
+        )
+        attempts = 0
+
+        async def connect():
+            nonlocal attempts
+            attempts += 1
+            return Reader(service), Writer()
+
+        with caplog.at_level(logging.WARNING):
+            await reconnect_loop(
+                connect,
+                service._session,
+                stop=service.stop,
+                retry_delay=0.001,
+                on_connected=service._on_connection_established,
+            )
+        return attempts
+
+    assert asyncio.run(run()) == 1
+    assert "Battery telemetry stale" in caplog.text
+    assert "Battery connection stale" not in caplog.text
+
+
+def test_shutdown_during_stale_recovery_does_not_reconnect() -> None:
+    class SilentReader:
+        async def read(self, size):
+            await asyncio.Future()
+
+    class Writer(FakeWriter):
+        def is_closing(self):
+            return self.closed
+
+    class Publisher:
+        def __init__(self):
+            self.connected = asyncio.Event()
+            self.connection_down = asyncio.Event()
+
+        def publish_connection(self, connected):
+            if not connected:
+                self.connection_down.set()
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+    async def run():
+        publisher = Publisher()
+        service = BatteryService(
+            Settings(battery_host="battery.invalid", stale_after=0.02, read_timeout=1), publisher
+        )
+        attempts = 0
+
+        async def connect():
+            nonlocal attempts
+            attempts += 1
+            writer = Writer()
+            service._writer = writer
+            return SilentReader(), writer
+
+        session_task = asyncio.create_task(
+            reconnect_loop(
+                connect,
+                service._session,
+                stop=service.stop,
+                retry_delay=1,
+                on_connected=service._on_connection_established,
+            )
+        )
+        await asyncio.wait_for(publisher.connection_down.wait(), timeout=1)
+        service.request_shutdown("SIGTERM")
+        await asyncio.wait_for(session_task, timeout=1)
+        return attempts, service
+
+    attempts, service = asyncio.run(run())
+    assert attempts == 1
+    assert service.stop.is_set()
+    assert service._session_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
