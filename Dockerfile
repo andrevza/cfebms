@@ -12,14 +12,14 @@ COPY run.sh /run.sh
 
 RUN python -m pip install --no-cache-dir . \
     && if [ -f /etc/alpine-release ]; then \
-         adduser -D -h /home/cfebms -u 10001 cfebms; \
+         addgroup -g 10001 cfebms \
+         && adduser -D -h /home/cfebms -u 10001 -G cfebms cfebms; \
        else \
-         useradd --create-home --uid 10001 cfebms; \
+         groupadd --gid 10001 cfebms \
+         && useradd --create-home --uid 10001 --gid cfebms cfebms; \
        fi \
     && chmod 755 /run.sh \
     && chown -R cfebms:cfebms /app
-
-USER cfebms
 
 FROM base AS test
 
@@ -29,7 +29,7 @@ COPY tests ./tests
 COPY config.yaml repository.yaml build.yaml Dockerfile run.sh docker-compose.yml DOCS.md icon.png logo.png ./
 COPY docs/images/cfebms-banner.png ./docs/images/cfebms-banner.png
 RUN chown -R cfebms:cfebms /app
-USER cfebms
+USER root
 
 ENTRYPOINT ["python", "-m", "pytest"]
 

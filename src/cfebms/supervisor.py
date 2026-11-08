@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import sys
 from pathlib import Path
 from typing import Any, Mapping
+
+from .config import Settings
 
 
 OPTIONS_PATH = Path("/data/options.json")
@@ -36,8 +39,19 @@ def apply_supervisor_options(options: Mapping[str, Any], environ: dict[str, str]
             environ[variable] = str(options[option])
 
 
+def _drop_privileges() -> None:
+    """Drop the startup process to the service account after config is loaded."""
+    if os.geteuid() != 0:
+        return
+    account = pwd.getpwnam("cfebms")
+    os.initgroups(account.pw_name, account.pw_gid)
+    os.setgid(account.pw_gid)
+    os.setuid(account.pw_uid)
+    os.environ["HOME"] = account.pw_dir
+
+
 def main() -> None:
-    if OPTIONS_PATH.is_file():
+    if OPTIONS_PATH.exists():
         try:
             options = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
             if not isinstance(options, dict):
@@ -50,6 +64,19 @@ def main() -> None:
     argv = ["cfebms", *sys.argv[1:]]
     if len(argv) == 1:
         argv.append("service")
+    if argv[1] == "service":
+        try:
+            Settings.from_env()
+        except ValueError as exc:
+            print(f"cfebms: invalid application configuration: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+
+    try:
+        _drop_privileges()
+    except (KeyError, OSError) as exc:
+        print(f"cfebms: cannot switch to the non-root service account: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
     os.execvpe("cfebms", argv, os.environ)
 
 

@@ -19,7 +19,7 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
     assert manifest["name"] == "CFE BMS"
     assert manifest["slug"] == "cfe_bms"
     assert manifest["description"] == "CFE Battery Management System"
-    assert manifest["version"] == "0.1.1"
+    assert manifest["version"] == "0.1.2"
     assert manifest["url"] == "https://github.com/andrevza/cfebms"
     assert {"aarch64", "amd64"}.issubset(manifest["arch"])
 
@@ -119,6 +119,7 @@ def test_app_entrypoint_executes_service_and_loads_supervisor_options(tmp_path, 
     monkeypatch.setattr(supervisor, "OPTIONS_PATH", options_path)
     monkeypatch.setattr(supervisor.sys, "argv", ["cfebms-supervisor"])
     monkeypatch.setattr(supervisor.os, "environ", {})
+    monkeypatch.setattr(supervisor, "_drop_privileges", lambda: None)
     invoked = {}
 
     def fake_execvpe(file, argv, env):
@@ -137,6 +138,8 @@ def test_runtime_container_uses_supervisor_wrapper() -> None:
     compose = (ROOT / "docker-compose.yml").read_text()
     assert 'CMD ["/run.sh", "service"]' in dockerfile
     assert 'ENTRYPOINT ["/run.sh"]' not in dockerfile
-    assert "adduser -D -h /home/cfebms -u 10001 cfebms" in dockerfile
+    assert "adduser -D -h /home/cfebms -u 10001 -G cfebms cfebms" in dockerfile
+    assert "groupadd --gid 10001 cfebms" in dockerfile
+    assert "USER cfebms" not in dockerfile
     assert 'entrypoint: ["/run.sh"]' in compose
     assert "exec python -m cfebms.supervisor \"$@\"" in run_script
