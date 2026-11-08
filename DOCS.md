@@ -1,102 +1,118 @@
 # CFE BMS Home Assistant App
 
-The App monitors a CFE battery over TCP and publishes measurements through the
-MQTT broker configured below. It supports Home Assistant App architectures
-`aarch64` and `amd64` and uses the same service, MQTT topics and entity
-identifiers as the standalone Docker Compose deployment.
-
-The currently supported battery target is the CFE-5100S. No other CFE model
-is claimed as supported.
+The App monitors a supported CFE battery over TCP and publishes telemetry to
+your MQTT broker. Home Assistant discovers the battery sensors automatically.
+The currently supported battery target is the CFE-5100S.
 
 ## Install
 
 1. In Home Assistant, open **Settings → Apps → App store → ⋮ → Repositories**.
 2. Add `https://github.com/andrevza/cfebms` and submit it.
 3. Find **CFE BMS** in the App store and install it.
-4. Open the App's **Configuration** page and set the battery host and MQTT
-   broker values. Save the options, then start the App.
+4. Configure the MQTT broker and battery connection below, then save and start
+   the App.
 
-The repository must be available on GitHub for Supervisor to fetch it. This
-project packaging has not yet been tested by installing it into a live
-Supervisor instance.
+## Configuration
 
-## Configure
+The App presents six connection settings by default. Advanced
+settings are optional and can be shown by enabling **Show unused optional
+configuration options** on the App's Configuration page. Omitted advanced
+settings use the Python application's defaults. Existing saved advanced
+settings remain supported.
 
-Set `cfe_battery_host` to the IP address or DNS name of the battery or its TCP
-bridge. The default TCP port is `6868`. Set `mqtt_host` and `mqtt_port` to the
-broker already used by Home Assistant. Fill in both MQTT username and password
-when the broker requires authentication; leave both empty for an anonymous
-broker. The password field is stored as a password option by the App schema.
+The App stores its options in Supervisor-managed configuration. Password
+fields are declared as password options and are not logged by cfebms.
 
-Example values (replace them with addresses and credentials for your network):
+### MQTT connection
+
+| Key | Purpose | Required | Accepted value | Default |
+| --- | --- | --- | --- | --- |
+| `mqtt_host` | MQTT broker hostname or IP address. | Yes | String | App default is blank and must be set. Python fallback, used only if no value is provided, is `mqtt.example.com`. |
+| `mqtt_port` | MQTT broker TCP port. | Yes | Integer, 1–65535 | Supervisor: `1883`; Python: `1883`. |
+| `mqtt_username` | Broker username; leave blank for an anonymous broker. Username and password must both be set or both be blank. | No | Optional string | Supervisor: blank; Python: unset (`None`). |
+| `mqtt_password` | Broker password; hidden by the Home Assistant configuration form. | No | Optional password | Supervisor: blank; Python: unset (`None`). |
+| `mqtt_discovery_prefix` | MQTT Home Assistant discovery topic prefix. | No | Optional string | Python: `homeassistant`. |
+| `mqtt_base_topic` | Root topic used for cfebms telemetry and availability. | No | Optional string | Python: `cfebms`. |
+
+The discovery prefix must match the prefix configured for Home Assistant's MQTT
+integration. Keep the base topic unchanged unless you need a different MQTT
+topic namespace.
+
+### Battery TCP connection
+
+| Key | Purpose | Required | Accepted value | Default |
+| --- | --- | --- | --- | --- |
+| `cfe_battery_host` | Battery or TCP bridge hostname/IP. | Yes | String | App default is blank; provide the address for your battery. Python requires this value. |
+| `cfe_battery_port` | Battery TCP port. | Yes | Integer, 1–65535 | Supervisor: `6868`; Python: `6868`. |
+| `cfe_connect_timeout` | Maximum time allowed for a TCP connection attempt. | No | Optional number, 0.1–86400 seconds | Python: `5.0` seconds. |
+| `cfe_read_timeout` | Maximum wait for incoming TCP data before the read operation times out. | No | Optional number, 0.1–86400 seconds | Python: `10.0` seconds. |
+| `cfe_reconnect_delay` | Delay before retrying a failed battery connection. | No | Optional number, 0.1–86400 seconds | Python: `5.0` seconds. |
+| `cfe_stale_after` | Time without battery TCP data before the connection is considered stale. | No | Optional number, 0.1–86400 seconds | Python: `30.0` seconds. |
+
+### Logging and diagnostics
+
+| Key | Purpose | Required | Accepted value | Default |
+| --- | --- | --- | --- | --- |
+| `log_level` | Application logging verbosity. | No | Optional `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` | Python: `INFO`. |
+| `heartbeat_log_interval_min` | Interval, in minutes, for operational health reports containing connection status, frame counts, SOC, and voltage. | No | Optional integer, 0–10080 | Python: `60` minutes. Set to `0` to disable periodic reports. |
+
+Periodic operational reports do not control battery communication or MQTT
+publishing. Increasing the interval reduces routine log output.
+
+## Minimal configuration example
+
+Enter the six visible connection settings. Replace documentation-only hosts and
+credentials with values for your network. Leave MQTT credentials blank when
+your broker allows anonymous access.
 
 ```yaml
-cfe_battery_host: battery.example.com
+cfe_battery_host: 192.0.2.10
 cfe_battery_port: 6868
-cfe_connect_timeout: 5.0
-cfe_read_timeout: 10.0
-cfe_reconnect_delay: 5.0
-cfe_stale_after: 30.0
-mqtt_host: mqtt.example.com
+mqtt_host: 192.0.2.20
 mqtt_port: 1883
 mqtt_username: ""
 mqtt_password: ""
-mqtt_discovery_prefix: homeassistant
-mqtt_base_topic: cfebms
-log_level: INFO
-heartbeat_log_interval_min: 60
 ```
 
-Documentation-only address examples are `192.0.2.10` for a battery bridge and
-`192.0.2.20` for an MQTT broker; these addresses are reserved for examples and
-must be replaced in a real installation.
+The addresses in this example are reserved for documentation and will not
+connect to a real battery or broker.
 
-All App options map to the existing service environment settings. Connection
-timeouts, stale telemetry duration, reconnect delay, discovery prefix, base
-topic and logging level use their current service defaults. Set
-`heartbeat_log_interval_min` to `0` to disable periodic operational heartbeat
-logging.
+## Advanced configuration example
 
-## Operate
+Enable **Show unused optional configuration options** to expose advanced
+settings. Only override the values you need; omitted options retain the Python
+defaults.
 
-- Start and stop the App from its Home Assistant App page.
-- Read runtime and connection logs in the App's **Logs** tab.
-- After the MQTT discovery publication, find the **CFE Battery** device under
-  **Settings → Devices & services → MQTT → Devices**.
-- Upgrade from the App page after a new version is available in the repository.
-  Existing MQTT discovery topics and entity IDs are retained across upgrades.
+```yaml
+cfe_connect_timeout: 8.0
+cfe_reconnect_delay: 10.0
+mqtt_discovery_prefix: homeassistant
+log_level: DEBUG
+heartbeat_log_interval_min: 0
+```
+
+## Operation and troubleshooting
+
+- Read connection and decoding messages in the App's **Logs** tab.
+- Find the discovered **CFE Battery** device under **Settings → Devices &
+  services → MQTT → Devices**.
+- If the battery does not connect, verify the battery/bridge address and TCP
+  port are reachable from the Home Assistant host.
+- If MQTT does not connect, check the broker address, port and credentials. The
+  Home Assistant MQTT integration and its discovery prefix must be configured
+  for the same broker.
+- If readings become unavailable, check the battery TCP connection and logs
+  for stale telemetry reports.
 
 Stop the standalone `cfebms` container before starting the App. Running both
-instances at once causes them to share the MQTT device and availability
+instances at once makes them share the same MQTT device and availability
 identity.
 
-## Troubleshoot
-
-- **Battery connection failures:** confirm `cfe_battery_host` resolves from the
-  Home Assistant host and that the TCP bridge accepts connections on port
-  `6868` (or the configured port). Review the App logs for the connection
-  error and retry messages.
-- **MQTT connection failures:** confirm the broker host/port and credentials.
-  The MQTT integration must be configured in Home Assistant and MQTT discovery
-  must be enabled. The configured discovery prefix must match the broker's
-  discovery convention.
-- **No battery device:** check the App logs for MQTT connection and discovery
-  publication messages, then verify the broker is reachable from Home
-  Assistant.
-- **Stale/unavailable readings:** check the battery TCP connection and App logs.
-  The service marks readings unavailable when telemetry becomes stale.
-
-Operational heartbeat reports appear in the App logs at the configured
-`heartbeat_log_interval_min`. They include connection health, received frame
-counts, and the latest decoded SOC and pack voltage. Set the interval to `0`
-to turn off periodic reports.
-
-The App is TCP-only. It does not request privileged mode, host networking,
-serial access or device mounts. The manifest has not been validated in a live
-Supervisor installation yet.
+The App does not require privileged mode, host networking, serial access, or
+device mounts.
 
 ## Standalone Docker Compose
 
-For the quick-start commands, see the standalone deployment section in
-[`README.md`](README.md). Configure battery and broker values as described
-above, and do not run the container and the Home Assistant App simultaneously.
+Standalone deployment instructions are in [`README.md`](README.md). Configure
+the battery and MQTT connection settings as above, and avoid running the App
+and standalone container simultaneously.

@@ -31,12 +31,29 @@ OPTION_ENV = {
     "heartbeat_log_interval_min": "HEARTBEAT_LOG_INTERVAL_MIN",
 }
 
+OPTIONAL_OPTIONS = {
+    "mqtt_username",
+    "mqtt_password",
+    "cfe_connect_timeout",
+    "cfe_read_timeout",
+    "cfe_reconnect_delay",
+    "cfe_stale_after",
+    "mqtt_discovery_prefix",
+    "mqtt_base_topic",
+    "log_level",
+    "heartbeat_log_interval_min",
+}
+
 
 def apply_supervisor_options(options: Mapping[str, Any], environ: dict[str, str]) -> None:
     """Set existing application environment variables from Supervisor options."""
     for option, variable in OPTION_ENV.items():
-        if option in options and options[option] is not None:
-            environ[variable] = str(options[option])
+        if option not in options or options[option] is None:
+            continue
+        value = options[option]
+        if option in OPTIONAL_OPTIONS and value == "":
+            continue
+        environ[variable] = str(value)
 
 
 def _drop_privileges() -> None:

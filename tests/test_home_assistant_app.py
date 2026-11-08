@@ -5,6 +5,7 @@ import json
 import struct
 from pathlib import Path
 
+import pytest
 import yaml
 
 from cfebms import supervisor
@@ -19,29 +20,21 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
     assert manifest["name"] == "CFE BMS"
     assert manifest["slug"] == "cfe_bms"
     assert manifest["description"] == "CFE Battery Management System"
-    assert manifest["version"] == "0.1.2"
+    assert manifest["version"] == "0.1.3"
     assert manifest["url"] == "https://github.com/andrevza/cfebms"
     assert {"aarch64", "amd64"}.issubset(manifest["arch"])
 
     expected = {
         "cfe_battery_host": "",
         "cfe_battery_port": 6868,
-        "cfe_connect_timeout": 5.0,
-        "cfe_read_timeout": 10.0,
-        "cfe_reconnect_delay": 5.0,
-        "cfe_stale_after": 30.0,
-        "mqtt_host": "mqtt.example.com",
+        "mqtt_host": "",
         "mqtt_port": 1883,
         "mqtt_username": "",
         "mqtt_password": "",
-        "mqtt_discovery_prefix": "homeassistant",
-        "mqtt_base_topic": "cfebms",
-        "log_level": "INFO",
-        "heartbeat_log_interval_min": 60,
     }
     assert manifest["options"] == expected
-    assert set(manifest["schema"]) == set(expected)
-    assert set(supervisor.OPTION_ENV) == set(expected)
+    assert set(manifest["schema"]) == set(supervisor.OPTION_ENV)
+    assert set(expected).issubset(manifest["schema"])
     assert set(supervisor.OPTION_ENV.values()) == {
         "CFE_BATTERY_HOST",
         "CFE_BATTERY_PORT",
@@ -58,7 +51,16 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
         "LOG_LEVEL",
         "HEARTBEAT_LOG_INTERVAL_MIN",
     }
-    assert manifest["schema"]["mqtt_password"] == "password"
+    assert manifest["schema"]["mqtt_password"] == "password?"
+    assert manifest["schema"]["cfe_connect_timeout"].endswith("?")
+    assert manifest["schema"]["cfe_read_timeout"].endswith("?")
+    assert manifest["schema"]["cfe_reconnect_delay"].endswith("?")
+    assert manifest["schema"]["cfe_stale_after"].endswith("?")
+    assert manifest["schema"]["mqtt_username"] == "str?"
+    assert manifest["schema"]["mqtt_discovery_prefix"] == "str?"
+    assert manifest["schema"]["mqtt_base_topic"] == "str?"
+    assert manifest["schema"]["log_level"].endswith("?")
+    assert manifest["schema"]["heartbeat_log_interval_min"] == "int(0,10080)?"
     assert set(manifest["arch"]) == {"aarch64", "amd64"}
     assert "privileged" not in manifest
     assert "host_network" not in manifest
@@ -111,6 +113,109 @@ def test_supervisor_options_map_to_existing_environment_and_credentials(monkeypa
     assert settings.mqtt_username == "mqtt_user"
     assert settings.mqtt_password == "secret-value"
     assert settings.heartbeat_log_interval_min == 0
+
+
+def test_minimal_app_options_keep_omitted_advanced_python_defaults(monkeypatch) -> None:
+    env = {}
+    supervisor.apply_supervisor_options(
+        {
+            "cfe_battery_host": "battery.example.com",
+            "cfe_battery_port": 6868,
+            "mqtt_host": "mqtt.example.com",
+            "mqtt_port": 1883,
+            "mqtt_username": "",
+            "mqtt_password": "",
+        },
+        env,
+    )
+    monkeypatch.setattr("os.environ", env)
+    settings = Settings.from_env()
+    assert settings.connect_timeout == 5.0
+    assert settings.read_timeout == 10.0
+    assert settings.reconnect_delay == 5.0
+    assert settings.stale_after == 30.0
+    assert settings.discovery_prefix == "homeassistant"
+    assert settings.base_topic == "cfebms"
+    assert settings.log_level == "INFO"
+    assert settings.heartbeat_log_interval_min == 60
+
+
+def test_null_or_empty_optional_options_do_not_replace_python_defaults(monkeypatch) -> None:
+    env = {}
+    supervisor.apply_supervisor_options(
+        {
+            "cfe_battery_host": "battery.example.com",
+            "mqtt_host": "mqtt.example.com",
+            "mqtt_username": "",
+            "mqtt_password": "",
+            "cfe_connect_timeout": None,
+            "mqtt_discovery_prefix": "",
+            "mqtt_base_topic": None,
+            "log_level": "",
+        },
+        env,
+    )
+    monkeypatch.setattr("os.environ", env)
+    settings = Settings.from_env()
+    assert settings.mqtt_username is None
+    assert settings.mqtt_password is None
+    assert settings.connect_timeout == 5.0
+    assert settings.discovery_prefix == "homeassistant"
+    assert settings.base_topic == "cfebms"
+    assert settings.log_level == "INFO"
+
+
+def test_optional_saved_advanced_app_options_override_python_defaults(monkeypatch) -> None:
+    env = {}
+    supervisor.apply_supervisor_options(
+        {
+            "cfe_battery_host": "battery.example.com",
+            "mqtt_host": "mqtt.example.com",
+            "cfe_connect_timeout": 8.5,
+            "cfe_read_timeout": 12.0,
+            "cfe_reconnect_delay": 7.0,
+            "cfe_stale_after": 45.0,
+            "mqtt_discovery_prefix": "ha_custom",
+            "mqtt_base_topic": "battery/cfe",
+            "log_level": "DEBUG",
+            "heartbeat_log_interval_min": 0,
+        },
+        env,
+    )
+    monkeypatch.setattr("os.environ", env)
+    settings = Settings.from_env()
+    assert settings.connect_timeout == 8.5
+    assert settings.read_timeout == 12.0
+    assert settings.reconnect_delay == 7.0
+    assert settings.stale_after == 45.0
+    assert settings.discovery_prefix == "ha_custom"
+    assert settings.base_topic == "battery/cfe"
+    assert settings.log_level == "DEBUG"
+    assert settings.heartbeat_log_interval_min == 0
+
+
+def test_invalid_advanced_option_keeps_clear_python_validation(monkeypatch) -> None:
+    env = {}
+    supervisor.apply_supervisor_options(
+        {
+            "cfe_battery_host": "battery.example.com",
+            "mqtt_host": "mqtt.example.com",
+            "cfe_connect_timeout": "not-a-number",
+        },
+        env,
+    )
+    monkeypatch.setattr("os.environ", env)
+    with pytest.raises(ValueError, match="CFE_CONNECT_TIMEOUT must be numeric"):
+        Settings.from_env()
+
+
+def test_app_docs_and_changelog_cover_options_and_app_versions() -> None:
+    docs = (ROOT / "DOCS.md").read_text()
+    changelog = (ROOT / "CHANGELOG.md").read_text()
+    for option in supervisor.OPTION_ENV:
+        assert f"`{option}`" in docs
+    for version in ("0.1.0", "0.1.1", "0.1.2", "0.1.3"):
+        assert f"## {version}" in changelog
 
 
 def test_app_entrypoint_executes_service_and_loads_supervisor_options(tmp_path, monkeypatch) -> None:
