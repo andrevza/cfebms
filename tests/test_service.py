@@ -178,7 +178,7 @@ def test_reconnect_loop_does_not_retry_after_shutdown_during_connect() -> None:
     assert attempts == 1
 
 
-def test_periodic_info_does_not_shorten_battery_retry_delay() -> None:
+def test_periodic_info_callback_does_not_change_battery_retry_delay() -> None:
     stop = asyncio.Event()
     attempts = 0
     second_attempt_at = None
@@ -203,7 +203,6 @@ def test_periodic_info_does_not_shorten_battery_retry_delay() -> None:
             stop=stop,
             retry_delay=0.06,
             on_periodic_info=lambda: None,
-            seconds_until_periodic_info=lambda: 0.005,
         )
     )
     assert attempts == 2
@@ -397,7 +396,8 @@ def test_reconnect_restarts_operational_heartbeat_baseline() -> None:
     service._on_connection_established()
     assert service._session_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
     assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
-    assert service._seconds_until_periodic_info() > 3500
+    assert service._next_heartbeat_deadline is not None
+    assert abs(service._next_heartbeat_deadline - service.last_heartbeat_monotonic - 3600) < 0.001
     assert service._latest_soc == 50
 
 
@@ -668,6 +668,7 @@ def test_heartbeats_before_and_after_report_boundary_are_echoed(caplog) -> None:
             self.boundary = boundary
             self.before_sent = False
             self.after_sent = False
+            self.cancelled_reads = 0
 
         async def read(self, size):
             if not self.before_sent:
@@ -675,7 +676,11 @@ def test_heartbeats_before_and_after_report_boundary_are_echoed(caplog) -> None:
                 self.before_sent = True
                 return before
             if not self.after_sent:
-                await asyncio.sleep(max(0, self.boundary + 0.01 - time.monotonic()))
+                try:
+                    await asyncio.sleep(max(0, self.boundary + 0.01 - time.monotonic()))
+                except asyncio.CancelledError:
+                    self.cancelled_reads += 1
+                    raise
                 self.after_sent = True
                 return after
             return b""
@@ -716,18 +721,20 @@ def test_heartbeats_before_and_after_report_boundary_are_echoed(caplog) -> None:
         service.last_heartbeat_monotonic = boundary - service._heartbeat_interval
         service._next_heartbeat_deadline = boundary
         writer = Writer()
+        reader = Reader(boundary)
         try:
-            await service._session(Reader(boundary), writer)
+            await service._session(reader, writer)
         except ConnectionError:
             pass
-        return writer.writes
+        return writer.writes, reader.cancelled_reads
 
     with caplog.at_level(logging.DEBUG):
-        writes = asyncio.run(run())
+        writes, cancelled_reads = asyncio.run(run())
     assert writes == [before, after]
+    assert cancelled_reads == 0
     reports = [record.getMessage() for record in caplog.records if "CFE degraded:" in record.getMessage()]
     assert len(reports) == 1
-    assert "1 heartbeats" in reports[0]
+    assert "2 heartbeats" in reports[0]
     timing = [
         record.getMessage()
         for record in caplog.records
@@ -842,6 +849,71 @@ def test_continuous_tcp_traffic_survives_multiple_health_reports_and_counts_exac
     assert writes == [OBSERVED_INITIAL_SEQUENCE] * 8
     assert "Battery connection stale" not in caplog.text
     assert caplog.text.count("CFE healthy:") + caplog.text.count("CFE degraded:") == len(report_counts)
+
+
+def test_continuous_tcp_traffic_with_reporting_disabled_keeps_acknowledging(caplog) -> None:
+    class Reader:
+        def __init__(self, service):
+            self.service = service
+            self.reads = 0
+
+        async def read(self, size):
+            if self.reads == 20:
+                self.service.stop.set()
+                return b""
+            await asyncio.sleep(0.004)
+            self.reads += 1
+            return _varied_heartbeat()
+
+    class Writer(FakeWriter):
+        def __init__(self):
+            super().__init__()
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+
+        async def drain(self):
+            return None
+
+    class Publisher:
+        def __init__(self):
+            self.connected = asyncio.Event()
+            self.connected.set()
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+    async def run():
+        service = BatteryService(
+            Settings(
+                battery_host="battery.invalid",
+                stale_after=1,
+                read_timeout=1,
+                heartbeat_log_interval_min=0,
+            ),
+            Publisher(),
+        )
+        writer = Writer()
+        try:
+            await service._session(Reader(service), writer)
+        except ConnectionError:
+            pass
+        return writer.writes, service._next_heartbeat_deadline
+
+    with caplog.at_level(logging.INFO):
+        writes, deadline = asyncio.run(run())
+    assert writes == [_varied_heartbeat()] * 20
+    assert deadline is None
+    assert "CFE healthy:" not in caplog.text
+    assert "CFE degraded:" not in caplog.text
+    assert "Battery connection stale" not in caplog.text
 
 
 def test_frame_counters_are_crc_valid_per_session_and_per_report(caplog) -> None:

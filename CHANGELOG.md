@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5
+
+- Keep operational health-report deadlines out of the TCP read timeout and
+  reconnect retry wait so reporting cannot cancel a pending battery read.
+
 ## 0.1.4
 
 - Echo every CRC-valid 19-byte CFE heartbeat exactly as received, matching the

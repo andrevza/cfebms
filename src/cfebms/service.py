@@ -31,7 +31,6 @@ async def reconnect_loop(
     retry_delay: float,
     on_connected: Callable[[], None] | None = None,
     on_periodic_info: Callable[[], None] | None = None,
-    seconds_until_periodic_info: Callable[[], float | None] | None = None,
 ) -> None:
     """Retry connections until stopped; exposed for deterministic fake tests."""
     consecutive_failures = 0
@@ -101,10 +100,6 @@ async def reconnect_loop(
                 wait_seconds = retry_deadline - asyncio.get_running_loop().time()
                 if wait_seconds <= 0:
                     break
-                if seconds_until_periodic_info is not None:
-                    until_heartbeat = seconds_until_periodic_info()
-                    if until_heartbeat is not None:
-                        wait_seconds = min(wait_seconds, max(until_heartbeat, 0.01))
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=wait_seconds)
                 except asyncio.TimeoutError:
@@ -178,7 +173,6 @@ class BatteryService:
             retry_delay=self.settings.reconnect_delay,
             on_connected=self._on_connection_established,
             on_periodic_info=self.log_periodic_info,
-            seconds_until_periodic_info=self._seconds_until_periodic_info,
         )
 
     def _reset_operational_counters(self, now: float | None = None) -> None:
@@ -203,12 +197,6 @@ class BatteryService:
             self.settings.battery_host,
             self.settings.battery_port,
         )
-
-    def _seconds_until_periodic_info(self, now: float | None = None) -> float | None:
-        if self._next_heartbeat_deadline is None:
-            return None
-        now = time.monotonic() if now is None else now
-        return max(0.0, self._next_heartbeat_deadline - now)
 
     def _log_session_timing(self, event: str, *, execution_ms: float | None = None) -> None:
         now = time.monotonic()
@@ -342,20 +330,11 @@ class BatteryService:
                         telemetry_stale = True
                     else:
                         read_timeout = min(read_timeout, telemetry_remaining)
-                heartbeat_remaining = self._seconds_until_periodic_info(now)
-                if heartbeat_remaining is not None:
-                    if heartbeat_remaining <= 0:
-                        self.log_periodic_info(now)
-                        heartbeat_remaining = self._seconds_until_periodic_info(now)
-                    if heartbeat_remaining is not None:
-                        read_timeout = min(read_timeout, max(heartbeat_remaining, 0.001))
-
                 try:
                     chunk = await asyncio.wait_for(reader.read(4096), timeout=read_timeout)
                 except asyncio.TimeoutError:
                     now = time.monotonic()
                     self.publisher.mark_stale(stale_after=self.settings.stale_after, now=now)
-                    self.log_periodic_info(now)
                     if not telemetry_stale and now - last_telemetry >= self.settings.stale_after:
                         _LOGGER.warning(
                             "Battery telemetry stale: no decoded measurements for %.1f seconds",
