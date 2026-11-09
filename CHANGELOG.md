@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Echo every CRC-valid 19-byte CFE heartbeat exactly as received, matching the
+  working reference client.
+- Add DEBUG timing details to existing periodic health reports for TCP session
+  age, recent receive/frame/ack timing, and report execution duration.
+
 ## 0.1.3
 
 - Show only the battery and MQTT connection settings by default in the Home

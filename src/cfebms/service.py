@@ -12,7 +12,7 @@ from typing import Any
 from .config import Settings
 from .frames import FrameAssembler, cfe_frame_length
 from .mqtt import MQTTPublisher
-from .protocol import OBSERVED_INITIAL_SEQUENCE, decode_cfe_telemetry
+from .protocol import decode_cfe_telemetry
 
 _LOGGER = logging.getLogger(__name__)
 FRAME_TYPES = ("HEARTBEAT", "STATUS", "SUMMARY", "DETAIL")
@@ -128,6 +128,9 @@ class BatteryService:
         self._session_frame_counts = dict.fromkeys(FRAME_TYPES, 0)
         self._interval_frame_counts = dict.fromkeys(FRAME_TYPES, 0)
         self._last_rx_monotonic: float | None = None
+        self._session_started_monotonic: float | None = None
+        self._last_valid_frame_monotonic: float | None = None
+        self._last_heartbeat_ack_monotonic: float | None = None
         self._last_valid_telemetry_monotonic: float | None = None
         self._latest_soc: int | float | None = None
         self._latest_voltage: int | float | None = None
@@ -239,6 +242,7 @@ class BatteryService:
         if now < self._next_heartbeat_deadline:
             return
 
+        report_started = time.monotonic()
         elapsed = now - self.last_heartbeat_monotonic
         overall, connection_status = self._connection_health(now)
         soc = "N/A" if self._latest_soc is None else f"{float(self._latest_soc):g}%"
@@ -265,12 +269,36 @@ class BatteryService:
         )
         self._next_heartbeat_deadline += missed_intervals * self._heartbeat_interval
         self._interval_frame_counts = dict.fromkeys(FRAME_TYPES, 0)
+        report_finished = time.monotonic()
+
+        def since(timestamp: float | None) -> str:
+            if timestamp is None:
+                return "N/A"
+            return f"{max(0.0, report_finished - timestamp):.3f}s"
+
+        session_uptime = (
+            "N/A"
+            if self._session_started_monotonic is None
+            else f"{report_finished - self._session_started_monotonic:.3f}s"
+        )
+        _LOGGER.debug(
+            "CFE health-report timing: session_uptime=%s, since_tcp_rx=%s, "
+            "since_valid_cfe_frame=%s, since_heartbeat_ack=%s, execution=%.3fms",
+            session_uptime,
+            since(self._last_rx_monotonic),
+            since(self._last_valid_frame_monotonic),
+            since(self._last_heartbeat_ack_monotonic),
+            (report_finished - report_started) * 1000,
+        )
 
     async def _session(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         _LOGGER.debug("CFE battery TCP session active")
         self._writer = writer
         self._session_frame_counts = dict.fromkeys(FRAME_TYPES, 0)
         session_started = time.monotonic()
+        self._session_started_monotonic = session_started
+        self._last_valid_frame_monotonic = None
+        self._last_heartbeat_ack_monotonic = None
         last_rx = session_started
         last_telemetry = self._last_valid_telemetry_monotonic or session_started
         self._last_rx_monotonic = last_rx
@@ -357,6 +385,7 @@ class BatteryService:
                 for frame in frames:
                     if self.stop.is_set():
                         break
+                    self._last_valid_frame_monotonic = time.monotonic()
                     frame_type = {
                         19: "HEARTBEAT",
                         35: "STATUS",
@@ -368,23 +397,23 @@ class BatteryService:
                         heartbeat_count = self._session_frame_counts["HEARTBEAT"]
                         if heartbeat_count == 1:
                             _LOGGER.info("First CRC-valid CFE heartbeat received")
-                        _LOGGER.debug("CFE heartbeat #%d received: %s", heartbeat_count, frame.hex(" "))
-                        if frame == OBSERVED_INITIAL_SEQUENCE:
-                            writer.write(OBSERVED_INITIAL_SEQUENCE)
-                            await writer.drain()
-                            if heartbeat_count == 1:
-                                _LOGGER.info("First CFE heartbeat acknowledged")
-                            _LOGGER.debug("CFE heartbeat #%d acknowledged", heartbeat_count)
+                        _LOGGER.debug("CFE heartbeat #%d received (length=%d)", heartbeat_count, len(frame))
+                        writer.write(frame)
+                        await writer.drain()
+                        self._last_heartbeat_ack_monotonic = time.monotonic()
+                        if heartbeat_count == 1:
+                            _LOGGER.info("First CFE heartbeat acknowledged")
+                        _LOGGER.debug("CFE heartbeat #%d acknowledged", heartbeat_count)
                         continue
                     if frame_type in {"STATUS", "SUMMARY", "DETAIL"}:
                         if frame_type not in first_frame_types:
                             _LOGGER.info("First valid CFE %s frame received (length=%d)", frame_type, len(frame))
                             first_frame_types.add(frame_type)
-                    _LOGGER.debug("RX CFE %s frame length=%d raw=%s", frame_type, len(frame), frame.hex(" "))
+                    _LOGGER.debug("RX CFE %s frame length=%d", frame_type, len(frame))
                     telemetry = decode_cfe_telemetry(frame)
                     for warning in telemetry.warnings:
                         _LOGGER.warning("CFE %s decode warning (length=%d): %s", frame_type, len(frame), warning or "no details")
-                        _LOGGER.debug("CFE parse failure frame=%s", frame.hex(" "))
+                        _LOGGER.debug("CFE parse failure frame length=%d", len(frame))
                     if telemetry.values:
                         if "soc_percent" in telemetry.values:
                             self._latest_soc = telemetry.values["soc_percent"]
@@ -413,6 +442,9 @@ class BatteryService:
                     _LOGGER.debug("CFE TCP close detail: %s", _exception_details(exc))
             self._writer = None
             self._last_rx_monotonic = None
+            self._session_started_monotonic = None
+            self._last_valid_frame_monotonic = None
+            self._last_heartbeat_ack_monotonic = None
             self._reset_operational_counters()
             _LOGGER.info("CFE battery disconnected")
             if self.stop.is_set():

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 
 import cfebms.service as service_module
 from cfebms.service import reconnect_loop, run_service
@@ -71,9 +72,14 @@ def test_connection_loop_logs_exception_type_details_and_retry(caplog) -> None:
     assert "consecutive failures: 1). Retrying in 0.001 seconds." in caplog.text
 
 
-def test_session_echoes_only_the_recognized_captured_heartbeat(caplog) -> None:
+def test_session_echoes_each_valid_heartbeat_exactly(caplog) -> None:
+    variant = bytearray(OBSERVED_INITIAL_SEQUENCE)
+    variant[9] ^= 1
+    variant[-3:-1] = crc16_modbus(variant[:-3]).to_bytes(2, "little")
+    variant = bytes(variant)
+
     class Reader:
-        chunks = [OBSERVED_INITIAL_SEQUENCE, b""]
+        chunks = [OBSERVED_INITIAL_SEQUENCE, variant, b""]
 
         async def read(self, size):
             return self.chunks.pop(0)
@@ -117,7 +123,7 @@ def test_session_echoes_only_the_recognized_captured_heartbeat(caplog) -> None:
         return writer.writes
 
     with caplog.at_level(logging.INFO):
-        assert asyncio.run(run()) == [OBSERVED_INITIAL_SEQUENCE]
+        assert asyncio.run(run()) == [OBSERVED_INITIAL_SEQUENCE, variant]
     assert "First CRC-valid CFE heartbeat received" in caplog.text
     assert "First CFE heartbeat acknowledged" in caplog.text
 
@@ -644,6 +650,197 @@ def _valid_frame(length: int, *, voltage: int | None = None, soc: int | None = N
         frame[19:21] = voltage.to_bytes(2, "little")
     frame[-3:-1] = crc16_modbus(frame[:-3]).to_bytes(2, "little")
     return bytes(frame)
+
+
+def _varied_heartbeat() -> bytes:
+    frame = bytearray(OBSERVED_INITIAL_SEQUENCE)
+    frame[9] ^= 1
+    frame[-3:-1] = crc16_modbus(frame[:-3]).to_bytes(2, "little")
+    return bytes(frame)
+
+
+def test_heartbeats_before_and_after_report_boundary_are_echoed(caplog) -> None:
+    before = OBSERVED_INITIAL_SEQUENCE
+    after = _varied_heartbeat()
+
+    class Reader:
+        def __init__(self, boundary):
+            self.boundary = boundary
+            self.before_sent = False
+            self.after_sent = False
+
+        async def read(self, size):
+            if not self.before_sent:
+                await asyncio.sleep(max(0, self.boundary - time.monotonic() - 0.01))
+                self.before_sent = True
+                return before
+            if not self.after_sent:
+                await asyncio.sleep(max(0, self.boundary + 0.01 - time.monotonic()))
+                self.after_sent = True
+                return after
+            return b""
+
+    class Writer(FakeWriter):
+        def __init__(self):
+            super().__init__()
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+
+        async def drain(self):
+            return None
+
+    class Publisher:
+        connected = asyncio.Event()
+
+        def __init__(self):
+            self.connected.set()
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+    async def run():
+        service = BatteryService(
+            Settings(battery_host="battery.invalid", stale_after=1, read_timeout=1),
+            Publisher(),
+        )
+        service._heartbeat_interval = 0.08
+        boundary = time.monotonic() + service._heartbeat_interval
+        service.last_heartbeat_monotonic = boundary - service._heartbeat_interval
+        service._next_heartbeat_deadline = boundary
+        writer = Writer()
+        try:
+            await service._session(Reader(boundary), writer)
+        except ConnectionError:
+            pass
+        return writer.writes
+
+    with caplog.at_level(logging.DEBUG):
+        writes = asyncio.run(run())
+    assert writes == [before, after]
+    reports = [record.getMessage() for record in caplog.records if "CFE degraded:" in record.getMessage()]
+    assert len(reports) == 1
+    assert "1 heartbeats" in reports[0]
+    timing = [
+        record.getMessage()
+        for record in caplog.records
+        if "CFE health-report timing:" in record.getMessage()
+    ]
+    assert len(timing) == 1
+    assert "session_uptime=" in timing[0]
+    assert "since_tcp_rx=" in timing[0]
+    assert "since_valid_cfe_frame=" in timing[0]
+    assert "since_heartbeat_ack=" in timing[0]
+    assert "execution=" in timing[0]
+    assert "Battery connection stale" not in caplog.text
+
+
+def test_continuous_tcp_traffic_survives_multiple_health_reports_and_counts_exactly(caplog) -> None:
+    frames = [
+        OBSERVED_INITIAL_SEQUENCE,
+        _valid_frame(35),
+        _valid_frame(73, voltage=4968, soc=7),
+        _valid_frame(97, voltage=496),
+    ]
+
+    class Reader:
+        def __init__(self, service):
+            self.service = service
+            self.reads = 0
+
+        async def read(self, size):
+            if self.reads == 32:
+                self.service.stop.set()
+                return b""
+            await asyncio.sleep(0.004)
+            frame = frames[self.reads % len(frames)]
+            self.reads += 1
+            return frame
+
+    class Writer(FakeWriter):
+        def __init__(self):
+            super().__init__()
+            self.writes = []
+
+        def write(self, value):
+            self.writes.append(value)
+
+        async def drain(self):
+            return None
+
+    class Publisher:
+        connected = asyncio.Event()
+
+        def __init__(self):
+            self.connected.set()
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+        def publish_values(self, values):
+            pass
+
+    async def run():
+        service = BatteryService(
+            Settings(battery_host="battery.invalid", stale_after=1, read_timeout=1),
+            Publisher(),
+        )
+        service._heartbeat_interval = 0.04
+        service.last_heartbeat_monotonic = time.monotonic()
+        service._next_heartbeat_deadline = (
+            service.last_heartbeat_monotonic + service._heartbeat_interval
+        )
+        writer = Writer()
+        observed = dict.fromkeys(service_module.FRAME_TYPES, 0)
+        previous_at_report = dict.fromkeys(service_module.FRAME_TYPES, 0)
+        report_counts = []
+        record_frame = service._record_frame
+        log_periodic_info = service.log_periodic_info
+
+        def record(frame_type):
+            record_frame(frame_type)
+            observed[frame_type] += 1
+
+        def report(now=None):
+            current_time = time.monotonic() if now is None else now
+            if service._next_heartbeat_deadline is not None and current_time >= service._next_heartbeat_deadline:
+                actual = dict(service._interval_frame_counts)
+                since_previous = {
+                    key: observed[key] - previous_at_report[key] for key in observed
+                }
+                report_counts.append((actual, since_previous))
+                previous_at_report.update(observed)
+            log_periodic_info(now)
+
+        service._record_frame = record
+        service.log_periodic_info = report
+        try:
+            await service._session(Reader(service), writer)
+        except ConnectionError:
+            pass
+        return observed, report_counts, writer.writes
+
+    with caplog.at_level(logging.INFO):
+        observed, report_counts, writes = asyncio.run(run())
+    assert len(report_counts) >= 2
+    assert all(actual == expected for actual, expected in report_counts)
+    assert observed == {"HEARTBEAT": 8, "STATUS": 8, "SUMMARY": 8, "DETAIL": 8}
+    assert writes == [OBSERVED_INITIAL_SEQUENCE] * 8
+    assert "Battery connection stale" not in caplog.text
+    assert caplog.text.count("CFE healthy:") + caplog.text.count("CFE degraded:") == len(report_counts)
 
 
 def test_frame_counters_are_crc_valid_per_session_and_per_report(caplog) -> None:
