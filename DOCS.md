@@ -57,7 +57,9 @@ topic namespace.
 | `heartbeat_log_interval_min` | Interval, in minutes, for operational health reports containing connection status, frame counts, SOC, and voltage. | No | Optional integer, 0–10080 | Python: `60` minutes. Set to `0` to disable periodic reports. |
 
 Periodic operational reports do not control battery communication or MQTT
-publishing. Increasing the interval reduces routine log output.
+publishing. Setting the interval to `0` disables only these health summary
+logs; CFE protocol heartbeat acknowledgements continue normally. Increasing
+the interval reduces routine log output.
 
 ## Minimal configuration example
 

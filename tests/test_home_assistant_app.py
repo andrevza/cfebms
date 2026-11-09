@@ -82,6 +82,23 @@ def test_build_and_icon_metadata_cover_requested_app_platforms() -> None:
     assert struct.unpack(">II", icon[16:24]) == (512, 512)
 
 
+def test_configuration_translations_match_exactly_the_manifest_schema() -> None:
+    manifest = yaml.safe_load((ROOT / "config.yaml").read_text())
+    translations = yaml.safe_load((ROOT / "translations/en.yaml").read_text())
+    configuration = translations["configuration"]
+
+    assert set(configuration) == set(manifest["schema"])
+    for key, text in configuration.items():
+        assert set(text) == {"name", "description"}, key
+        assert isinstance(text["name"], str) and text["name"].strip(), key
+        assert isinstance(text["description"], str) and text["description"].strip(), key
+
+    assert manifest["schema"]["mqtt_password"] == "password?"
+    assert "CFE protocol heartbeat acknowledgements" in configuration[
+        "heartbeat_log_interval_min"
+    ]["description"]
+
+
 def test_approved_branding_files_are_installed_without_modification() -> None:
     expected_assets = {
         "logo.png": "7e6d36d20e03ddb34eaefd04e7d7481cc2359e3c5d271cb9b9abf49b335de71b",

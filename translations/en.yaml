@@ -1,0 +1,56 @@
+configuration:
+  cfe_battery_host:
+    name: "CFE battery host"
+    description: "Hostname or IP address of the CFE battery's TCP interface."
+
+  cfe_battery_port:
+    name: "CFE battery TCP port"
+    description: "TCP port used to connect to the battery (normally 6868)."
+
+  cfe_connect_timeout:
+    name: "Connection timeout"
+    description: "Maximum time to establish a TCP connection, in seconds (0.1–86400; default 5)."
+
+  cfe_read_timeout:
+    name: "TCP read timeout"
+    description: "Maximum wait for TCP bytes before checking the connection again, in seconds (0.1–86400; default 10)."
+
+  cfe_reconnect_delay:
+    name: "Reconnect delay"
+    description: "Seconds to wait before retrying a failed connection (0.1–86400; default 5)."
+
+  cfe_stale_after:
+    name: "Stale connection timeout"
+    description: "Maximum time without battery TCP data before the session is marked stale and reconnected (0.1–86400 seconds; default 30)."
+
+  mqtt_host:
+    name: "MQTT host"
+    description: "Hostname or IP address of your MQTT broker."
+
+  mqtt_port:
+    name: "MQTT port"
+    description: "TCP port of your MQTT broker (normally 1883)."
+
+  mqtt_username:
+    name: "MQTT username"
+    description: "Username for broker authentication. Leave blank together with the password for anonymous access."
+
+  mqtt_password:
+    name: "MQTT password"
+    description: "Password for broker authentication. Leave blank together with the username for anonymous access."
+
+  mqtt_discovery_prefix:
+    name: "MQTT discovery prefix"
+    description: "Home Assistant MQTT discovery topic prefix (default homeassistant)."
+
+  mqtt_base_topic:
+    name: "MQTT base topic"
+    description: "Root topic for cfebms telemetry and availability (default cfebms)."
+
+  log_level:
+    name: "Log level"
+    description: "Application logging verbosity: DEBUG, INFO, WARNING, ERROR, or CRITICAL (default INFO)."
+
+  heartbeat_log_interval_min:
+    name: "Health summary interval"
+    description: "Minutes between periodic health summary logs (0–10080; default 60). HEARTBEAT_LOG_INTERVAL_MIN=0 disables these logs, not CFE protocol heartbeat acknowledgements."
