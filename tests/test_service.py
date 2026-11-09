@@ -739,6 +739,7 @@ def test_heartbeats_before_and_after_report_boundary_are_echoed(caplog) -> None:
     assert "since_valid_cfe_frame=" in timing[0]
     assert "since_heartbeat_ack=" in timing[0]
     assert "execution=" in timing[0]
+    assert "68 01 0c" not in caplog.text
     assert "Battery connection stale" not in caplog.text
 
 
@@ -987,7 +988,7 @@ def test_silent_tcp_session_reconnects_and_resets_counts(caplog) -> None:
                     service.stop.set()
                 raise
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             await reconnect_loop(
                 connect,
                 session,
@@ -1001,6 +1002,9 @@ def test_silent_tcp_session_reconnects_and_resets_counts(caplog) -> None:
     assert attempts == 2
     assert publisher.connection_down.is_set()
     assert "Battery connection stale: no TCP data received" in caplog.text
+    assert "CFE stale TCP session timing:" in caplog.text
+    assert "since_valid_cfe_frame=N/A" in caplog.text
+    assert "since_heartbeat_ack=N/A" in caplog.text
     assert service._session_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
     assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
 

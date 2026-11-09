@@ -210,6 +210,31 @@ class BatteryService:
         now = time.monotonic() if now is None else now
         return max(0.0, self._next_heartbeat_deadline - now)
 
+    def _log_session_timing(self, event: str, *, execution_ms: float | None = None) -> None:
+        now = time.monotonic()
+
+        def since(timestamp: float | None) -> str:
+            if timestamp is None:
+                return "N/A"
+            return f"{max(0.0, now - timestamp):.3f}s"
+
+        session_uptime = (
+            "N/A"
+            if self._session_started_monotonic is None
+            else f"{now - self._session_started_monotonic:.3f}s"
+        )
+        duration = "N/A" if execution_ms is None else f"{execution_ms:.3f}ms"
+        _LOGGER.debug(
+            "CFE %s timing: session_uptime=%s, since_tcp_rx=%s, "
+            "since_valid_cfe_frame=%s, since_heartbeat_ack=%s, execution=%s",
+            event,
+            session_uptime,
+            since(self._last_rx_monotonic),
+            since(self._last_valid_frame_monotonic),
+            since(self._last_heartbeat_ack_monotonic),
+            duration,
+        )
+
     def _connection_health(self, now: float) -> tuple[str, str]:
         is_closing = getattr(self._writer, "is_closing", lambda: False)
         battery_connected = self._writer is not None and not is_closing()
@@ -270,25 +295,8 @@ class BatteryService:
         self._next_heartbeat_deadline += missed_intervals * self._heartbeat_interval
         self._interval_frame_counts = dict.fromkeys(FRAME_TYPES, 0)
         report_finished = time.monotonic()
-
-        def since(timestamp: float | None) -> str:
-            if timestamp is None:
-                return "N/A"
-            return f"{max(0.0, report_finished - timestamp):.3f}s"
-
-        session_uptime = (
-            "N/A"
-            if self._session_started_monotonic is None
-            else f"{report_finished - self._session_started_monotonic:.3f}s"
-        )
-        _LOGGER.debug(
-            "CFE health-report timing: session_uptime=%s, since_tcp_rx=%s, "
-            "since_valid_cfe_frame=%s, since_heartbeat_ack=%s, execution=%.3fms",
-            session_uptime,
-            since(self._last_rx_monotonic),
-            since(self._last_valid_frame_monotonic),
-            since(self._last_heartbeat_ack_monotonic),
-            (report_finished - report_started) * 1000,
+        self._log_session_timing(
+            "health-report", execution_ms=(report_finished - report_started) * 1000
         )
 
     async def _session(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -313,6 +321,7 @@ class BatteryService:
                 tcp_remaining = self.settings.stale_after - (now - last_rx)
                 if tcp_remaining <= 0:
                     self.publisher.mark_stale(stale_after=self.settings.stale_after, now=now)
+                    self._log_session_timing("stale TCP session")
                     _LOGGER.warning(
                         "Battery connection stale: no TCP data received for %.1f seconds",
                         now - last_rx,
@@ -354,6 +363,7 @@ class BatteryService:
                         )
                         telemetry_stale = True
                     if now - last_rx >= self.settings.stale_after:
+                        self._log_session_timing("stale TCP session")
                         _LOGGER.warning(
                             "Battery connection stale: no TCP data received for %.1f seconds",
                             now - last_rx,
