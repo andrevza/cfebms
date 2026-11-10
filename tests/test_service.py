@@ -5,6 +5,8 @@ import logging
 import signal
 import time
 
+import pytest
+
 import cfebms.service as service_module
 from cfebms.mqtt import MQTTPublisher
 from cfebms.service import reconnect_loop, run_service
@@ -890,6 +892,131 @@ def _valid_frame(length: int, *, voltage: int | None = None, soc: int | None = N
         frame[19:21] = voltage.to_bytes(2, "little")
     frame[-3:-1] = crc16_modbus(frame[:-3]).to_bytes(2, "little")
     return bytes(frame)
+
+
+@pytest.mark.parametrize(
+    ("frame_type", "rtc_raw"),
+    (("SUMMARY", 1700000000), ("DETAIL", 1700000001)),
+)
+def test_decoded_frame_debug_line_appends_rtc_without_publishing_it(
+    caplog, frame_type: str, rtc_raw: int
+) -> None:
+    summary = bytearray(_valid_frame(73, voltage=5460, soc=78))
+    summary[9:13] = (1700000000).to_bytes(4, "little")
+    summary[-3:-1] = crc16_modbus(summary[:-3]).to_bytes(2, "little")
+    detail = bytearray(_valid_frame(97, voltage=546))
+    detail[9:13] = (1700000001).to_bytes(4, "little")
+    detail[-3:-1] = crc16_modbus(detail[:-3]).to_bytes(2, "little")
+    selected_frame = summary if frame_type == "SUMMARY" else detail
+    selected_frame[9:13] = rtc_raw.to_bytes(4, "little")
+    selected_frame[-3:-1] = crc16_modbus(selected_frame[:-3]).to_bytes(2, "little")
+    chunks = [bytes(summary)] if frame_type == "SUMMARY" else [bytes(summary), bytes(detail)]
+    chunks.append(b"")
+
+    class Reader:
+        async def read(self, size):
+            return chunks.pop(0)
+
+    class Writer(FakeWriter):
+        async def wait_closed(self):
+            return None
+
+    class Publisher:
+        def __init__(self):
+            self.published = []
+
+        def mark_telemetry_ready(self):
+            pass
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+        def publish_values(self, values):
+            self.published.append(dict(values))
+
+    async def run():
+        publisher = Publisher()
+        service = BatteryService(Settings(battery_host="battery.invalid"), publisher)
+        try:
+            await service._session(Reader(), Writer())
+        except ConnectionError:
+            pass
+        return publisher.published
+
+    with caplog.at_level(logging.DEBUG, logger="cfebms.service"):
+        published = asyncio.run(run())
+
+    decoded_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Decoded CFE ")
+    ]
+    expected_raw = f"'battery_rtc_raw': {rtc_raw}"
+    expected_iso = (
+        "'battery_rtc_iso': '2023-11-14T22:13:20+00:00'"
+        if rtc_raw == 1700000000
+        else "'battery_rtc_iso': '2023-11-14T22:13:21+00:00'"
+    )
+    frame_line = next(line for line in decoded_lines if line.startswith(f"Decoded CFE {frame_type} "))
+    assert expected_raw in frame_line
+    assert expected_iso in frame_line
+    assert frame_line.index("'voltage_v'") < frame_line.index(expected_raw) < frame_line.index(expected_iso)
+    assert sum("battery_rtc_" in record.getMessage() for record in caplog.records) == len(decoded_lines)
+    assert len(decoded_lines) == (1 if frame_type == "SUMMARY" else 2)
+    assert all("battery_rtc_" not in values for values in published)
+    assert "68 01 0c" not in caplog.text
+
+
+def test_summary_info_logging_does_not_include_rtc_metadata(caplog) -> None:
+    frame = bytearray(_valid_frame(73, voltage=5460, soc=78))
+    frame[9:13] = (1700000000).to_bytes(4, "little")
+    frame[-3:-1] = crc16_modbus(frame[:-3]).to_bytes(2, "little")
+
+    class Reader:
+        chunks = [bytes(frame), b""]
+
+        async def read(self, size):
+            return self.chunks.pop(0)
+
+    class Writer(FakeWriter):
+        async def wait_closed(self):
+            return None
+
+    class Publisher:
+        def mark_telemetry_ready(self):
+            pass
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+        def publish_values(self, values):
+            pass
+
+    async def run():
+        service = BatteryService(Settings(battery_host="battery.invalid"), Publisher())
+        try:
+            await service._session(Reader(), Writer())
+        except ConnectionError:
+            pass
+
+    with caplog.at_level(logging.INFO, logger="cfebms.service"):
+        asyncio.run(run())
+
+    assert "First valid CFE SUMMARY frame received (length=73)" in caplog.text
+    assert not any("Decoded CFE" in record.getMessage() for record in caplog.records)
+    assert not any("battery_rtc_" in record.getMessage() for record in caplog.records)
 
 
 def _varied_heartbeat() -> bytes:

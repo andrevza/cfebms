@@ -438,7 +438,12 @@ class BatteryService:
                         elif self._telemetry_recovery_pending:
                             _LOGGER.info("Battery telemetry recovered after battery reconnection")
                             self._telemetry_recovery_pending = False
-                        _LOGGER.debug("Decoded CFE %s measurements: %s", frame_type, telemetry.values)
+                        if _LOGGER.isEnabledFor(logging.DEBUG):
+                            debug_values = dict(telemetry.values)
+                            debug_values.update(telemetry.diagnostics)
+                            _LOGGER.debug(
+                                "Decoded CFE %s measurements: %s", frame_type, debug_values
+                            )
                         self.publisher.publish_values(telemetry.values)
         finally:
             try:
