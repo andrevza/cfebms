@@ -48,6 +48,46 @@ reachable from the Docker bridge network. The service does not require
 privileged mode or host networking. Do not run the standalone container and
 the Home Assistant App at the same time; they share an MQTT device identity.
 
+## Docker Hub images
+
+Release images are built and published to Docker Hub only when a `v*` Git tag
+is pushed. Before tagging, set the Home Assistant App version in `config.yaml`
+to the same version as the tag (for example, `0.1.9` and `v0.1.9`). The workflow
+runs the Docker test suite first, verifies that version match, then builds and
+publishes `linux/amd64` and `linux/arm64` images. Each release gets both
+`<version>` and `v<version>` tags; it does not create or update `latest`.
+
+To release, update `config.yaml` to the intended App version, commit and merge
+that change to `main`, then push the matching Git tag. For example:
+
+```sh
+git switch main
+# Set config.yaml to version: "0.1.9" and commit the release change.
+git tag v0.1.9
+git push origin main
+git push origin v0.1.9
+```
+
+The tag push starts the test and image publishing workflow. Check the GitHub
+Actions run before pulling the new image.
+
+Configure these repository Actions settings before the first release:
+
+- Variable `DOCKERHUB_USERNAME`: the Docker Hub account or organization that
+  owns the `cfebms` repository.
+- Secret `DOCKERHUB_TOKEN`: a Docker Hub access token with permission to push
+  to that repository.
+
+After a release tag is pushed, pull the versioned image with:
+
+```sh
+export DOCKERHUB_USERNAME=your-dockerhub-username
+docker pull "$DOCKERHUB_USERNAME/cfebms:0.1.9"
+```
+
+Docker selects the matching platform image automatically. Raspberry Pi devices
+need a 64-bit OS to use the `linux/arm64` image.
+
 ## Development
 
 Development, tests, and the diagnostic CLI run in Docker; no Python packages

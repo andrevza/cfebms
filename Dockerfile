@@ -52,6 +52,7 @@ USER root
 RUN python -m pip install --no-cache-dir '.[dev]'
 COPY tests ./tests
 COPY config.yaml repository.yaml build.yaml Dockerfile run.sh docker-compose.yml DOCS.md CHANGELOG.md icon.png logo.png ./
+COPY .github/workflows/docker.yml ./.github/workflows/docker.yml
 COPY docs/images/cfebms-banner.png ./docs/images/cfebms-banner.png
 COPY translations ./translations
 RUN chown -R cfebms:cfebms /app

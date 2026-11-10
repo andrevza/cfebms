@@ -235,6 +235,42 @@ def test_app_docs_and_changelog_cover_options_and_app_versions() -> None:
         assert f"## {version}" in changelog
 
 
+def test_docker_hub_workflow_is_tag_only_and_gates_publish_on_tests() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/docker.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    assert workflow["on"] == {"push": {"tags": ["v*"]}}
+
+    jobs = workflow["jobs"]
+    assert "docker compose run --build --rm test" in jobs["test"]["steps"][2]["run"]
+    assert jobs["publish"]["needs"] == "test"
+    publish_steps = jobs["publish"]["steps"]
+    metadata = next(step for step in publish_steps if step.get("id") == "meta")
+    build = next(
+        step
+        for step in publish_steps
+        if step.get("uses", "").startswith("docker/build-push-action@")
+    )
+
+    assert metadata["with"]["images"] == "${{ vars.DOCKERHUB_USERNAME }}/cfebms"
+    assert "latest=false" in metadata["with"]["flavor"]
+    assert "type=semver,pattern={{version}}" in metadata["with"]["tags"]
+    assert "type=ref,event=tag" in metadata["with"]["tags"]
+    assert "org.opencontainers.image.source=https://github.com/${{ github.repository }}" in metadata["with"]["labels"]
+    assert "org.opencontainers.image.licenses=GPL-3.0-only" in metadata["with"]["labels"]
+    assert build["with"]["platforms"] == "linux/amd64,linux/arm64"
+    assert build["with"]["push"] == "true"
+    assert "latest" not in metadata["with"]["tags"]
+
+    login = next(
+        step
+        for step in publish_steps
+        if step.get("uses", "").startswith("docker/login-action@")
+    )
+    assert login["with"]["username"] == "${{ vars.DOCKERHUB_USERNAME }}"
+    assert login["with"]["password"] == "${{ secrets.DOCKERHUB_TOKEN }}"
+
+
 def test_app_entrypoint_executes_service_and_loads_supervisor_options(tmp_path, monkeypatch) -> None:
     options_path = tmp_path / "options.json"
     options_path.write_text(json.dumps({"cfe_battery_host": "battery.example.com"}))
