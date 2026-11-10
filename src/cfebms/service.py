@@ -126,7 +126,10 @@ class BatteryService:
         self._session_started_monotonic: float | None = None
         self._last_valid_frame_monotonic: float | None = None
         self._last_heartbeat_ack_monotonic: float | None = None
+        # Historical timestamp; retained across sessions for diagnostics only.
         self._last_valid_telemetry_monotonic: float | None = None
+        self._session_last_valid_telemetry_monotonic: float | None = None
+        self._telemetry_recovery_pending = False
         self._latest_soc: int | float | None = None
         self._latest_voltage: int | float | None = None
         self._latest_battery_rtc: str | None = None
@@ -234,8 +237,8 @@ class BatteryService:
         )
         mqtt_connected = self.publisher.connected.is_set()
         telemetry_fresh = (
-            self._last_valid_telemetry_monotonic is not None
-            and now - self._last_valid_telemetry_monotonic < self.settings.stale_after
+            self._session_last_valid_telemetry_monotonic is not None
+            and now - self._session_last_valid_telemetry_monotonic < self.settings.stale_after
         )
         if not battery_connected or tcp_stale or not mqtt_connected:
             overall = "unhealthy"
@@ -299,7 +302,10 @@ class BatteryService:
         self._last_valid_frame_monotonic = None
         self._last_heartbeat_ack_monotonic = None
         last_rx = session_started
-        last_telemetry = self._last_valid_telemetry_monotonic or session_started
+        # Each TCP session starts awaiting fresh telemetry. Historical values
+        # remain available for diagnostics but cannot establish session health.
+        last_telemetry = session_started
+        self._session_last_valid_telemetry_monotonic = None
         self._last_rx_monotonic = last_rx
         self.publisher.publish_connection(True)
         telemetry_stale = False
@@ -332,6 +338,7 @@ class BatteryService:
                             now - last_telemetry,
                         )
                         telemetry_stale = True
+                        self._telemetry_recovery_pending = True
                     else:
                         read_timeout = min(read_timeout, telemetry_remaining)
                 try:
@@ -345,6 +352,7 @@ class BatteryService:
                             now - last_telemetry,
                         )
                         telemetry_stale = True
+                        self._telemetry_recovery_pending = True
                     if now - last_rx >= self.settings.stale_after:
                         self._log_session_timing("stale TCP session")
                         _LOGGER.warning(
@@ -367,6 +375,7 @@ class BatteryService:
                         last_rx - last_telemetry,
                     )
                     telemetry_stale = True
+                    self._telemetry_recovery_pending = True
                 frames = assembler.feed(chunk)
                 for diagnostic in assembler.diagnostics:
                     _LOGGER.debug("CFE frame parser detail: %s: %s", diagnostic.code, diagnostic.detail)
@@ -420,10 +429,15 @@ class BatteryService:
                             self._latest_voltage = telemetry.values["voltage_v"]
                         now = time.monotonic()
                         self._last_valid_telemetry_monotonic = now
+                        self._session_last_valid_telemetry_monotonic = now
                         last_telemetry = now
                         if telemetry_stale:
                             _LOGGER.info("Battery telemetry recovered after stale interval")
+                            self._telemetry_recovery_pending = False
                             telemetry_stale = False
+                        elif self._telemetry_recovery_pending:
+                            _LOGGER.info("Battery telemetry recovered after battery reconnection")
+                            self._telemetry_recovery_pending = False
                         _LOGGER.debug("Decoded CFE %s measurements: %s", frame_type, telemetry.values)
                         self.publisher.publish_values(telemetry.values)
         finally:
@@ -443,6 +457,7 @@ class BatteryService:
             self._session_started_monotonic = None
             self._last_valid_frame_monotonic = None
             self._last_heartbeat_ack_monotonic = None
+            self._session_last_valid_telemetry_monotonic = None
             self._reset_operational_counters()
             _LOGGER.info("CFE battery disconnected")
             if self.stop.is_set():
@@ -450,6 +465,8 @@ class BatteryService:
             if not self.stop.is_set():
                 self.publisher.publish_connection(False)
                 self.publisher.mark_all_unavailable()
+            if self._last_valid_telemetry_monotonic is not None:
+                self._telemetry_recovery_pending = True
 
 
 async def run_service(settings: Settings) -> None:

@@ -510,6 +510,7 @@ def test_operational_heartbeat_reports_health_counts_values_and_elapsed_interval
     now = deadline + 0.7
     service._last_rx_monotonic = now
     service._last_valid_telemetry_monotonic = now
+    service._session_last_valid_telemetry_monotonic = now
     service._session_frame_counts.update(HEARTBEAT=12, STATUS=3, SUMMARY=4, DETAIL=4)
     service._interval_frame_counts.update(HEARTBEAT=12, STATUS=3, SUMMARY=4, DETAIL=4)
     service._latest_soc = 7
@@ -775,6 +776,7 @@ def test_operational_heartbeat_is_degraded_when_telemetry_is_stale(caplog) -> No
     assert deadline is not None
     service._last_rx_monotonic = deadline
     service._last_valid_telemetry_monotonic = deadline - service.settings.stale_after - 1
+    service._session_last_valid_telemetry_monotonic = deadline - service.settings.stale_after - 1
 
     with caplog.at_level(logging.INFO):
         service.log_periodic_info(now=deadline)
@@ -803,6 +805,7 @@ def test_operational_heartbeat_is_unhealthy_for_stale_tcp_or_disconnected_mqtt(c
     stale_tcp._writer = Writer()
     stale_tcp._last_rx_monotonic = stale_deadline - stale_tcp.settings.stale_after - 1
     stale_tcp._last_valid_telemetry_monotonic = stale_deadline
+    stale_tcp._session_last_valid_telemetry_monotonic = stale_deadline
 
     mqtt_down = BatteryService(
         Settings(battery_host="battery.invalid", heartbeat_log_interval_min=1),
@@ -813,6 +816,7 @@ def test_operational_heartbeat_is_unhealthy_for_stale_tcp_or_disconnected_mqtt(c
     mqtt_down._writer = Writer()
     mqtt_down._last_rx_monotonic = mqtt_deadline
     mqtt_down._last_valid_telemetry_monotonic = mqtt_deadline
+    mqtt_down._session_last_valid_telemetry_monotonic = mqtt_deadline
 
     with caplog.at_level(logging.INFO):
         stale_tcp.log_periodic_info(now=stale_deadline)
@@ -844,6 +848,7 @@ def test_operational_heartbeat_deadline_does_not_accumulate_execution_drift(capl
     report_at = first_deadline + 0.7
     service._last_rx_monotonic = report_at
     service._last_valid_telemetry_monotonic = report_at
+    service._session_last_valid_telemetry_monotonic = report_at
 
     with caplog.at_level(logging.INFO):
         service.log_periodic_info(now=report_at)
@@ -851,6 +856,7 @@ def test_operational_heartbeat_deadline_does_not_accumulate_execution_drift(capl
         second_report = first_deadline + 60.2
         service._last_rx_monotonic = second_report
         service._last_valid_telemetry_monotonic = second_report
+        service._session_last_valid_telemetry_monotonic = second_report
         service.log_periodic_info(now=second_report)
 
     assert "interval=60.7s" in caplog.text
@@ -1349,6 +1355,7 @@ def test_valid_heartbeat_traffic_keeps_tcp_session_without_fresh_telemetry(caplo
 
         def __init__(self):
             self.connected.set()
+            self.telemetry_available = False
 
         def publish_connection(self, connected):
             pass
@@ -1357,12 +1364,16 @@ def test_valid_heartbeat_traffic_keeps_tcp_session_without_fresh_telemetry(caplo
             pass
 
         def mark_all_unavailable(self):
-            pass
+            self.telemetry_available = False
 
     async def run():
         service = BatteryService(
             Settings(battery_host="battery.invalid", stale_after=0.03, read_timeout=1), Publisher()
         )
+        service._last_valid_telemetry_monotonic = time.monotonic() - 69.8
+        service._latest_soc = 61
+        service._latest_voltage = 49.68
+        service._latest_battery_rtc = "2026-11-10T10:00:00+00:00"
         attempts = 0
 
         async def connect():
@@ -1370,7 +1381,7 @@ def test_valid_heartbeat_traffic_keeps_tcp_session_without_fresh_telemetry(caplo
             attempts += 1
             return Reader(service), Writer()
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.DEBUG):
             await reconnect_loop(
                 connect,
                 service._session,
@@ -1381,8 +1392,142 @@ def test_valid_heartbeat_traffic_keeps_tcp_session_without_fresh_telemetry(caplo
         return attempts
 
     assert asyncio.run(run()) == 1
-    assert "Battery telemetry stale" in caplog.text
+    messages = [record.getMessage() for record in caplog.records]
+    first_heartbeat = messages.index("First CRC-valid CFE heartbeat received")
+    stale_telemetry = [
+        index for index, message in enumerate(messages)
+        if message.startswith("Battery telemetry stale:")
+    ]
+    assert len(stale_telemetry) == 1
+    assert first_heartbeat < stale_telemetry[0]
+    assert "69.8 seconds" not in messages[stale_telemetry[0]]
+    assert "Battery telemetry recovered" not in caplog.text
     assert "Battery connection stale" not in caplog.text
+
+
+def test_stale_tcp_then_reconnect_resets_telemetry_freshness_and_recovers(caplog) -> None:
+    class Publisher:
+        def __init__(self):
+            self.connected = asyncio.Event()
+            self.connected.set()
+            self.telemetry_available = False
+            self.published_values = []
+            self.availability_transitions = []
+
+        def mark_telemetry_ready(self):
+            pass
+
+        def publish_connection(self, connected):
+            self.availability_transitions.append(("connection", connected))
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            self.telemetry_available = False
+            self.availability_transitions.append(("telemetry", False))
+
+        def publish_values(self, values):
+            self.published_values.append(dict(values))
+            self.telemetry_available = True
+            self.availability_transitions.append(("telemetry", True))
+
+    class Writer(FakeWriter):
+        def __init__(self):
+            super().__init__()
+            self.writes = []
+
+        def is_closing(self):
+            return self.closed
+
+        def write(self, value):
+            self.writes.append(value)
+
+        async def drain(self):
+            pass
+
+    class StaleReader:
+        def __init__(self, summary):
+            self.summary = summary
+
+        async def read(self, size):
+            if self.summary is not None:
+                summary = self.summary
+                self.summary = None
+                return summary
+            await asyncio.Future()
+
+    publisher = Publisher()
+    service = BatteryService(
+        Settings(battery_host="battery.invalid", stale_after=0.05, read_timeout=0.2),
+        publisher,
+    )
+    previous_summary = _valid_frame(73, voltage=5150, soc=77)
+    new_summary = _valid_frame(73, voltage=5056, soc=10)
+
+    class ReconnectedReader:
+        def __init__(self):
+            self.chunks = [OBSERVED_INITIAL_SEQUENCE, new_summary, b""]
+            self.awaiting_health = None
+            self.awaiting_history = None
+            self.awaiting_availability = None
+
+        async def read(self, size):
+            if self.chunks[0] == new_summary:
+                await asyncio.sleep(0.01)
+                self.awaiting_health = service._connection_health(time.monotonic())[0]
+                self.awaiting_history = (
+                    service._latest_soc,
+                    service._latest_voltage,
+                    service._latest_battery_rtc,
+                )
+                self.awaiting_availability = publisher.telemetry_available
+            return self.chunks.pop(0)
+
+    async def run():
+        try:
+            await service._session(StaleReader(previous_summary), Writer())
+        except ConnectionError:
+            pass
+
+        assert service._last_valid_telemetry_monotonic is not None
+        service._latest_battery_rtc = "2026-11-10T10:00:00+00:00"
+        # Model the long downtime from the field log while retaining old values.
+        service._last_valid_telemetry_monotonic = time.monotonic() - 69.8
+        service._on_connection_established()
+
+        reader = ReconnectedReader()
+        writer = Writer()
+        try:
+            await service._session(reader, writer)
+        except ConnectionError:
+            pass
+        return reader, writer
+
+    with caplog.at_level(logging.DEBUG):
+        reader, writer = asyncio.run(run())
+
+    messages = [record.getMessage() for record in caplog.records]
+    reconnect_index = max(
+        index for index, message in enumerate(messages)
+        if message.startswith("Connected to CFE battery")
+    )
+    reconnect_warnings = [
+        message for message in messages[reconnect_index + 1:]
+        if message.startswith("Battery telemetry stale:")
+    ]
+    assert reconnect_warnings == []
+    assert reader.awaiting_health == "degraded"
+    assert reader.awaiting_history == (77, 51.5, "2026-11-10T10:00:00+00:00")
+    assert reader.awaiting_availability is False
+    assert writer.writes == [OBSERVED_INITIAL_SEQUENCE]
+    assert service._latest_soc == 10
+    assert service._latest_voltage == 50.56
+    assert publisher.telemetry_available is False  # session end marks it unavailable again
+    assert ("telemetry", True) in publisher.availability_transitions
+    assert messages.count("Battery telemetry recovered after battery reconnection") == 1
+    assert messages.count("Battery telemetry recovered after stale interval") == 0
+    assert "Battery telemetry stale: no decoded measurements" in caplog.text
 
 
 def test_shutdown_during_stale_recovery_does_not_reconnect() -> None:
