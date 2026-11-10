@@ -14,6 +14,14 @@ Only a CRC-valid, exact HEARTBEAT is echoed.
 
 ## SUMMARY (73 bytes)
 
+The battery RTC is an observed u32 little-endian Unix-seconds field at bytes
+9–12 in both SUMMARY and DETAIL frames. The reference converts it with
+`datetime.fromtimestamp`, which uses the host's local timezone; the packet does
+not carry a timezone. cfebms keeps the raw value and rendered UTC ISO-8601
+timestamp in diagnostic metadata, separate from measurements published to
+MQTT. Temperature bytes outside the three directly published sensor readings
+remain unclassified unless their mapping is confirmed.
+
 | Field | Offset(s) | Representation | Scaling |
 |---|---:|---|---:|
 | Pack voltage | 13–14 | u16 little-endian | /100 V |

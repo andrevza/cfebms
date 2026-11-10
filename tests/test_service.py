@@ -510,16 +510,89 @@ def test_operational_heartbeat_reports_health_counts_values_and_elapsed_interval
     service._interval_frame_counts.update(HEARTBEAT=12, STATUS=3, SUMMARY=4, DETAIL=4)
     service._latest_soc = 7
     service._latest_voltage = 49.68
+    service._latest_battery_rtc = "2026-11-10T10:00:00"
 
     with caplog.at_level(logging.INFO):
         service.log_periodic_info(now=now)
 
     assert (
         "CFE healthy: battery connected, MQTT connected, 12 heartbeats, 3 statuses, "
-        "4 summaries, 4 detail frames, SOC=7%, voltage=49.68V (interval=3600.7s)"
+        "4 summaries, 4 detail frames, SOC=7%, voltage=49.68V, "
+        "battery_rtc=2026-11-10T10:00:00 (interval=3600.7s)"
     ) in caplog.text
     assert service._session_frame_counts["HEARTBEAT"] == 12
     assert service._interval_frame_counts == dict.fromkeys(service_module.FRAME_TYPES, 0)
+
+
+def test_operational_health_summary_supports_five_minute_interval(caplog) -> None:
+    class Publisher:
+        connected = asyncio.Event()
+
+    service = BatteryService(
+        Settings(battery_host="battery.invalid", heartbeat_log_interval_min=5),
+        Publisher(),
+    )
+    deadline = service._next_heartbeat_deadline
+    assert deadline is not None
+    service.log_periodic_info(now=deadline - 0.1)
+    assert "CFE healthy:" not in caplog.text
+
+    with caplog.at_level(logging.INFO):
+        service.log_periodic_info(now=deadline)
+    assert "(interval=300.0s)" in caplog.text
+
+
+def test_battery_rtc_is_diagnostic_only_and_updates_health_report() -> None:
+    rtc = 1700000000
+
+    class Reader:
+        async def read(self, size):
+            nonlocal frame_sent
+            if frame_sent:
+                return b""
+            frame_sent = True
+            return frame
+
+    class Writer(FakeWriter):
+        async def drain(self):
+            return None
+
+    class Publisher:
+        def __init__(self):
+            self.values = []
+
+        def publish_connection(self, connected):
+            pass
+
+        def mark_stale(self, **kwargs):
+            pass
+
+        def mark_all_unavailable(self):
+            pass
+
+        def publish_values(self, values):
+            self.values.append(dict(values))
+
+    frame = bytearray(_valid_frame(73, voltage=5056, soc=10))
+    frame[9:13] = rtc.to_bytes(4, "little")
+    frame[-3:-1] = crc16_modbus(frame[:-3]).to_bytes(2, "little")
+    frame = bytes(frame)
+    frame_sent = False
+    publisher = Publisher()
+    service = BatteryService(Settings(battery_host="battery.invalid"), publisher)
+
+    async def run():
+        try:
+            await service._session(Reader(), Writer())
+        except ConnectionError:
+            pass
+
+    asyncio.run(run())
+
+    assert service._latest_battery_rtc == "2023-11-14T22:13:20+00:00"
+    assert publisher.values
+    assert all("battery_rtc_iso" not in values for values in publisher.values)
+    assert all("battery_rtc_raw" not in values for values in publisher.values)
 
 
 def test_operational_heartbeat_is_degraded_when_telemetry_is_stale(caplog) -> None:

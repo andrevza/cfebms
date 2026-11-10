@@ -10,10 +10,11 @@ MeasurementValue: TypeAlias = float | int | str
 
 @dataclass(frozen=True, slots=True)
 class BatteryTelemetry:
-    """One decoded record, retaining raw bytes not mapped by the decoder."""
+    """Decoded measurements and diagnostic metadata for one retained frame."""
 
     message_length: int
     values: dict[str, MeasurementValue] = field(default_factory=dict)
     provisional_fields: frozenset[str] = frozenset()
     unsupported_payload: bytes = b""
     warnings: tuple[str, ...] = ()
+    diagnostics: dict[str, MeasurementValue] = field(default_factory=dict)

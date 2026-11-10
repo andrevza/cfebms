@@ -20,4 +20,7 @@ against a live battery capture.
 
 SOC is decoded from SUMMARY byte 33 only. Unknown bytes, extra temperature
 candidates, and diagnostic flags are retained in the raw frame and are not
-published as measurements.
+published as measurements. SUMMARY and DETAIL RTC bytes 9–12 are decoded as
+little-endian Unix seconds and kept as diagnostic metadata, separate from
+publishable measurements. The periodic health report renders the timestamp in
+UTC ISO-8601; it is not published as telemetry.

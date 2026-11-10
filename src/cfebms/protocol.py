@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from .frames import FrameStatus, RawFrame, is_valid_cfe_frame
 from .models import BatteryTelemetry, MeasurementValue
@@ -62,7 +63,9 @@ def decode_cfe_telemetry(data: bytes) -> BatteryTelemetry:
         return BatteryTelemetry(len(data), {}, frozenset(), data, ("Invalid or non-telemetry CFE frame.",))
 
     values: dict[str, MeasurementValue] = {}
+    diagnostics: dict[str, MeasurementValue] = {}
     if len(data) == 73:
+        _decode_battery_rtc(data, diagnostics)
         values["voltage_v"] = u16(data, 13) / 100
         values["current_a"] = s16(data, 15) / 100
         values["power_w"] = values["voltage_v"] * values["current_a"]
@@ -85,6 +88,7 @@ def decode_cfe_telemetry(data: bytes) -> BatteryTelemetry:
         ):
             values[field] = u16(data, offset) / divisor
     elif len(data) == 97:
+        _decode_battery_rtc(data, diagnostics)
         values["voltage_v"] = u16(data, 19) / 10
         values["current_a"] = s16(data, 21) / 100
         values["power_w"] = values["voltage_v"] * values["current_a"]
@@ -117,7 +121,9 @@ def decode_cfe_telemetry(data: bytes) -> BatteryTelemetry:
                 # The original decoder computes cell extrema and numbering
                 # from the individual cell list, not the reported raw fields.
         # Detail frames carry no SOC/SOH or operating-state summary mapping.
-    return BatteryTelemetry(len(data), values, frozenset(), data, ())
+    return BatteryTelemetry(
+        len(data), values, frozenset(), data, (), diagnostics=diagnostics
+    )
 
 
 def u16(frame: bytes, offset: int) -> int:
@@ -130,6 +136,23 @@ def s16(frame: bytes, offset: int) -> int:
 
 def u32(frame: bytes, offset: int) -> int:
     return int.from_bytes(frame[offset:offset + 4], "little", signed=False)
+
+
+def _decode_battery_rtc(frame: bytes, diagnostics: dict[str, MeasurementValue]) -> None:
+    """Decode the observed little-endian Unix seconds as diagnostic metadata."""
+    rtc_raw = u32(frame, 9)
+    diagnostics["battery_rtc_raw"] = rtc_raw
+    rtc_iso = battery_rtc_iso(rtc_raw)
+    if rtc_iso:
+        diagnostics["battery_rtc_iso"] = rtc_iso
+
+
+def battery_rtc_iso(value: int) -> str:
+    """Format Unix seconds as a timezone-explicit UTC ISO-8601 timestamp."""
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    except (ValueError, OSError, OverflowError):
+        return ""
 
 
 def _state_name(code: int) -> str:

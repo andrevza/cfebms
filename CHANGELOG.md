@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6
+
+- Add battery RTC diagnostics from SUMMARY and DETAIL frames to periodic health
+  reports without publishing RTC metadata as MQTT telemetry.
+
 ## 0.1.5
 
 - Keep operational health-report deadlines out of the TCP read timeout and

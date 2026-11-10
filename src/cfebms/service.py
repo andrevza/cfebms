@@ -129,6 +129,7 @@ class BatteryService:
         self._last_valid_telemetry_monotonic: float | None = None
         self._latest_soc: int | float | None = None
         self._latest_voltage: int | float | None = None
+        self._latest_battery_rtc: str | None = None
 
     def request_shutdown(self, reason: str) -> None:
         if self.stop.is_set():
@@ -260,10 +261,11 @@ class BatteryService:
         overall, connection_status = self._connection_health(now)
         soc = "N/A" if self._latest_soc is None else f"{float(self._latest_soc):g}%"
         voltage = "N/A" if self._latest_voltage is None else f"{float(self._latest_voltage):.2f}V"
+        battery_rtc = self._latest_battery_rtc or "N/A"
         counts = self._interval_frame_counts
         _LOGGER.info(
             "CFE %s: %s, %d heartbeats, %d statuses, %d summaries, %d detail frames, "
-            "SOC=%s, voltage=%s (interval=%.1fs)",
+            "SOC=%s, voltage=%s, battery_rtc=%s (interval=%.1fs)",
             overall,
             connection_status,
             counts["HEARTBEAT"],
@@ -272,6 +274,7 @@ class BatteryService:
             counts["DETAIL"],
             soc,
             voltage,
+            battery_rtc,
             elapsed,
         )
         self.last_heartbeat_monotonic = now
@@ -400,6 +403,9 @@ class BatteryService:
                             first_frame_types.add(frame_type)
                     _LOGGER.debug("RX CFE %s frame length=%d", frame_type, len(frame))
                     telemetry = decode_cfe_telemetry(frame)
+                    rtc = telemetry.diagnostics.get("battery_rtc_iso")
+                    if isinstance(rtc, str) and rtc:
+                        self._latest_battery_rtc = rtc
                     for warning in telemetry.warnings:
                         _LOGGER.warning("CFE %s decode warning (length=%d): %s", frame_type, len(frame), warning or "no details")
                         _LOGGER.debug("CFE parse failure frame length=%d", len(frame))
@@ -414,7 +420,6 @@ class BatteryService:
                         if telemetry_stale:
                             _LOGGER.info("Battery telemetry recovered after stale interval")
                             telemetry_stale = False
-                        last_telemetry = now
                         _LOGGER.debug("Decoded CFE %s measurements: %s", frame_type, telemetry.values)
                         self.publisher.publish_values(telemetry.values)
         finally:

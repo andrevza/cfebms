@@ -61,6 +61,7 @@ def test_stream_assembler_handles_fragmented_and_concatenated_mixed_frames() -> 
 def test_summary_decoder_uses_reference_summary_offsets() -> None:
     # Synthetic frame checks the ported calculations, not hardware behavior.
     raw = bytearray(make_frame(73))
+    raw[9:13] = (1700000000).to_bytes(4, "little")
     raw[13:15] = (5123).to_bytes(2, "little")
     raw[15:17] = (-125).to_bytes(2, "little", signed=True)
     raw[17:21] = (12000).to_bytes(4, "little")
@@ -81,6 +82,9 @@ def test_summary_decoder_uses_reference_summary_offsets() -> None:
     raw[-3:-1] = crc16_modbus(raw[:-3]).to_bytes(2, "little")
     decoded = decode_cfe_telemetry(bytes(raw))
     assert decoded.values["voltage_v"] == 51.23
+    assert "battery_rtc_iso" not in decoded.values
+    assert decoded.diagnostics["battery_rtc_raw"] == 1700000000
+    assert decoded.diagnostics["battery_rtc_iso"] == "2023-11-14T22:13:20+00:00"
     assert decoded.values["current_a"] == -1.25
     assert decoded.values["power_w"] == 51.23 * -1.25
     assert decoded.values["charge_capacity_ah"] == 120
@@ -98,6 +102,7 @@ def test_summary_decoder_uses_reference_summary_offsets() -> None:
 
 def test_detail_decoder_handles_dynamic_cell_and_temperature_counts() -> None:
     raw = bytearray(make_frame(97))
+    raw[9:13] = (1700000001).to_bytes(4, "little")
     raw[19:21] = (521).to_bytes(2, "little")
     raw[21:23] = (-230).to_bytes(2, "little", signed=True)
     raw[44] = 16
@@ -115,6 +120,9 @@ def test_detail_decoder_handles_dynamic_cell_and_temperature_counts() -> None:
 
     decoded = decode_cfe_telemetry(bytes(raw))
     assert decoded.values["voltage_v"] == 52.1
+    assert "battery_rtc_iso" not in decoded.values
+    assert decoded.diagnostics["battery_rtc_raw"] == 1700000001
+    assert decoded.diagnostics["battery_rtc_iso"] == "2023-11-14T22:13:21+00:00"
     assert decoded.values["current_a"] == -2.3
     assert decoded.values["cell_1_v"] == 3.3
     assert decoded.values["cell_16_v"] == 3.45
@@ -155,3 +163,9 @@ def test_detail_decoder_respects_non_default_dynamic_counts() -> None:
     assert decoded.values["temperature_1_c"] == 22
     assert decoded.values["temperature_2_c"] == 24
     assert "temperature_3_c" not in decoded.values
+
+
+def test_battery_rtc_out_of_range_is_retained_without_timestamp() -> None:
+    from cfebms.protocol import battery_rtc_iso
+
+    assert battery_rtc_iso(10**100) == ""

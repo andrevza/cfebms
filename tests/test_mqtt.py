@@ -66,6 +66,38 @@ def settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def test_battery_rtc_diagnostics_do_not_add_home_assistant_entities() -> None:
+    expected_ids = {
+        "pack_1_v_pack",
+        "pack_1_i_pack",
+        "pack_1_soc",
+        "pack_1_soh",
+        "pack_1_state",
+        "pack_1_power",
+        "pack_1_charge_energy",
+        "pack_1_discharge_energy",
+        "pack_1_charge_capacity",
+        "pack_1_discharge_capacity",
+        "pack_1_v_cell_min",
+        "pack_1_v_cell_max",
+        "pack_1_v_cell_avg",
+        "pack_1_cells_max_diff",
+        "pack_1_cell_min_index",
+        "pack_1_cell_max_index",
+        *(f"pack_1_v_cell_{index}" for index in range(1, 17)),
+        *(f"pack_1_temp_{index}" for index in range(1, 4)),
+        "pack_1_temp_min",
+        "pack_1_temp_max",
+        "pack_1_charge_voltage_limit",
+        "pack_1_charge_current_limit",
+        "pack_1_discharge_voltage_limit",
+        "pack_1_discharge_current_limit",
+        "battery_connection",
+    }
+    assert {spec.object_id for spec in ENTITY_SPECS} == expected_ids
+    assert len(expected_ids) == 42
+
+
 def test_discovery_payload_has_stable_device_metadata() -> None:
     spec = next(item for item in ENTITY_SPECS if item.object_id == "pack_1_v_pack")
     payload = discovery_payload(spec, settings())
