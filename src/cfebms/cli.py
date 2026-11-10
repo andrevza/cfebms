@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "service":
+            from .build_info import log_build_identity
             from .config import Settings
             from .service import run_service
 
@@ -52,6 +53,7 @@ def main(argv: list[str] | None = None) -> int:
                 level=getattr(logging, settings.log_level),
                 format="%(asctime)s %(levelname)s %(name)s: %(message)s",
             )
+            log_build_identity(settings.log_level)
             asyncio.run(run_service(settings))
             return 0
         if args.hex is not None:

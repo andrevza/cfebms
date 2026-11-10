@@ -1,3 +1,7 @@
 build_from:
   aarch64: ghcr.io/home-assistant/base-python:3.12-alpine3.24
   amd64: ghcr.io/home-assistant/base-python:3.12-alpine3.24
+args:
+  BUILD_GIT_SHA: unknown
+  BUILD_TIMESTAMP: unknown
+  BUILD_SOURCE_STATE: unknown

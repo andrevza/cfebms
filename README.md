@@ -33,12 +33,13 @@ it; installation in a live Supervisor instance has not yet been verified.
 ## Standalone Docker Compose
 
 Copy the sample environment file, set reachable battery and MQTT addresses,
-then start the service:
+then build with source metadata and start the service:
 
 ```sh
 cp .env.example .env
 # Edit .env and set CFE_BATTERY_HOST and MQTT_HOST (and broker credentials if required).
-docker compose up --build -d cfebms
+./scripts/docker-build.sh
+docker compose up -d cfebms
 docker compose logs -f cfebms
 ```
 
@@ -55,6 +56,16 @@ need to be installed on the host. Run the offline test suite with:
 ```sh
 docker compose run --build --rm test
 ```
+
+Build the standalone service image with `scripts/docker-build.sh` to embed the
+current Git revision and whether the working tree is dirty. Ordinary Docker or
+Supervisor builds without a supplied revision log `Git commit: unknown`;
+Supervisor supplies the App version from `config.yaml`, while the image build
+records its UTC construction time. The startup identity is printed once at INFO
+level before MQTT connection attempts. Check it in Home Assistant under the App's
+logs. The Python package version is separate from the Home Assistant App version.
+For dirty local builds, the log says `Source state: dirty`; that identifies that
+the source differs from HEAD but does not describe those modifications.
 
 Build and use the diagnostic CLI with a frame or a local capture file:
 
