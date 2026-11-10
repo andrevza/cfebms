@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.8
+
+- Report startup build identity, including the App version, Git revision and
+  source state when available, UTC build timestamp, Python runtime, and logging
+  level.
+- Append decoded battery RTC metadata to existing per-frame DEBUG output for
+  SUMMARY and DETAIL frames, including `battery_rtc_raw` and
+  `battery_rtc_iso`.
+- Keep RTC metadata out of MQTT telemetry and preserve the existing 42 Home
+  Assistant entities.
+- Improve diagnostics for investigating recurring battery TCP interruptions;
+  this release does not change or claim to fix the interruption.
+
 ## 0.1.7
 
 - Delay Home Assistant discovery and battery measurement publication until a

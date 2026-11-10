@@ -15,7 +15,7 @@ from cfebms.build_info import (
 
 def test_write_build_info_uses_app_manifest_and_preserves_full_sha(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text('name: "CFE BMS"\nversion: "0.1.7"\n', encoding="utf-8")
+    config_path.write_text('name: "CFE BMS"\nversion: "0.1.8"\n', encoding="utf-8")
     output_path = tmp_path / "build-metadata.json"
     full_sha = "b2d881f528f0049cc4d4c7d5075275900fb65276"
 
@@ -27,7 +27,7 @@ def test_write_build_info_uses_app_manifest_and_preserves_full_sha(tmp_path: Pat
         source_state="dirty",
     )
 
-    assert info == BuildInfo("0.1.7", full_sha, "2026-11-10T12:00:00Z", "dirty")
+    assert info == BuildInfo("0.1.8", full_sha, "2026-11-10T12:00:00Z", "dirty")
     assert info.short_sha == "b2d881f"
     assert json.loads(output_path.read_text(encoding="utf-8"))["git_sha"] == full_sha
 
@@ -53,7 +53,7 @@ def test_timestamp_is_normalized_to_utc_and_dirty_state_is_never_inferred(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text('version: "0.1.7"\n', encoding="utf-8")
+    config_path.write_text('version: "0.1.8"\n', encoding="utf-8")
     output_path = tmp_path / "build-metadata.json"
     info = write_build_info(
         config_path,
@@ -69,7 +69,7 @@ def test_missing_build_timestamp_is_generated_as_utc_during_metadata_creation(
     tmp_path: Path,
 ) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text('version: "0.1.7"\n', encoding="utf-8")
+    config_path.write_text('version: "0.1.8"\n', encoding="utf-8")
     info = write_build_info(config_path, tmp_path / "build-metadata.json")
 
     assert info.built_at.endswith("Z")
@@ -83,7 +83,7 @@ def test_startup_identity_reports_python_log_level_and_no_credentials(
     metadata.write_text(
         json.dumps(
             {
-                "app_version": "0.1.7",
+                "app_version": "0.1.8",
                 "git_sha": "b2d881f528f0049cc4d4c7d5075275900fb65276",
                 "built_at": "2026-11-10T12:00:00Z",
                 "source_state": "dirty",
@@ -98,7 +98,7 @@ def test_startup_identity_reports_python_log_level_and_no_credentials(
     messages = [record.getMessage() for record in caplog.records]
     assert messages == [
         "CFE BMS starting",
-        "App version: 0.1.7",
+        "App version: 0.1.8",
         "Git commit: b2d881f (b2d881f528f0049cc4d4c7d5075275900fb65276)",
         "Source state: dirty",
         "Built at: 2026-11-10T12:00:00Z",

@@ -20,7 +20,7 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
     assert manifest["name"] == "CFE BMS"
     assert manifest["slug"] == "cfe_bms"
     assert manifest["description"] == "CFE Battery Management System"
-    assert manifest["version"] == "0.1.7"
+    assert manifest["version"] == "0.1.8"
     assert manifest["url"] == "https://github.com/andrevza/cfebms"
     assert {"aarch64", "amd64"}.issubset(manifest["arch"])
 
@@ -231,7 +231,7 @@ def test_app_docs_and_changelog_cover_options_and_app_versions() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text()
     for option in supervisor.OPTION_ENV:
         assert f"`{option}`" in docs
-    for version in ("0.1.0", "0.1.1", "0.1.2", "0.1.3"):
+    for version in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.8"):
         assert f"## {version}" in changelog
 
 
