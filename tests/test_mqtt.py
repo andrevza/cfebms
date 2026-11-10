@@ -130,6 +130,7 @@ def test_publisher_will_measurements_and_stale_availability() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
     assert client.will == ("cfebms/availability", "offline", 1, True)
+    publisher.mark_telemetry_ready()
     publisher.publish_values({"voltage_v": 52.3}, now=100.0)
     publisher.mark_stale(stale_after=30.0, now=131.0)
     assert ("cfebms/pack_1/v_pack", "52.30", 1, True) in client.published
@@ -141,6 +142,7 @@ def test_publisher_will_measurements_and_stale_availability() -> None:
 def test_publisher_marks_all_sampled_entities_unavailable_on_disconnect() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
+    publisher.mark_telemetry_ready()
     publisher.publish_values({"voltage_v": 51.0, "current_a": -1.0}, now=10.0)
     publisher.mark_all_unavailable()
     assert ("cfebms/availability/pack_1_v_pack", "offline", 1, True) in client.published
@@ -151,6 +153,7 @@ def test_publisher_marks_all_sampled_entities_unavailable_on_disconnect() -> Non
 def test_publisher_routes_decoded_summary_and_detail_values() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
+    publisher.mark_telemetry_ready()
     publisher.publish_values({
         "soc_percent": 84,
         "cell_16_v": 3.412,
@@ -169,6 +172,7 @@ def test_publisher_routes_decoded_summary_and_detail_values() -> None:
 def test_cell_voltage_payloads_convert_volts_to_millivolts_without_mutating_input() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
+    publisher.mark_telemetry_ready()
     values = {
         "cell_1_v": 3.132,
         "cell_min_v": 3.121,
@@ -257,6 +261,7 @@ def test_technical_entities_are_discovery_diagnostics() -> None:
 def test_pack_voltage_payload_and_discovery_preserve_two_decimal_volts() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
+    publisher.mark_telemetry_ready()
     publisher.publish_values({"voltage_v": 49.6})
 
     voltage_spec = next(spec for spec in ENTITY_SPECS if spec.object_id == "pack_1_v_pack")
@@ -272,8 +277,9 @@ def test_pack_voltage_payload_and_discovery_preserve_two_decimal_volts() -> None
 def test_discovery_updates_existing_topics_retained_in_place() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
-    publisher.publish_discovery()
-    publisher.publish_discovery()
+    publisher._broker_connected = True
+    publisher.mark_telemetry_ready()
+    publisher.publish_discovery(force=True)
 
     configs = [item for item in client.published if item[0].endswith("/config")]
     topic = "homeassistant/sensor/BMS-CFE-5100S/pack_1_v_cell_1/config"
@@ -287,7 +293,8 @@ def test_discovery_updates_existing_topics_retained_in_place() -> None:
 def test_discovery_publishes_only_currently_decoded_measurements() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
-    publisher.publish_discovery()
+    publisher._broker_connected = True
+    publisher.mark_telemetry_ready()
     topics = {topic for topic, *_ in client.published}
     assert "homeassistant/sensor/BMS-CFE-5100S/pack_1_v_pack/config" in topics
     discovery_topics = {topic for topic in topics if topic.endswith("/config")}
@@ -305,6 +312,7 @@ def test_mqtt_connect_sets_availability_and_subscribes_for_birth(caplog) -> None
     assert (
         "cfebms/availability", "online", 1, True
     ) in client.published
+    assert not any(topic.endswith("/config") for topic, *_ in client.published)
     assert "MQTT connected to broker" in caplog.text
     assert "MQTT reconnected to broker" in caplog.text
 
@@ -315,6 +323,52 @@ def test_mqtt_connect_rejects_failed_reason_code() -> None:
     publisher._on_connect(client, None, None, ReasonCode(is_failure=True), None)
     assert client.subscriptions == []
     assert client.published == []
+
+
+def test_start_connects_mqtt_without_publishing_discovery_before_telemetry() -> None:
+    class ConnectedClient(FakeMQTTClient):
+        def connect(self, host, port, keepalive):
+            self.on_connect(self, None, None, ReasonCode(is_failure=False), None)
+
+        def loop_start(self):
+            pass
+
+    async def run():
+        client = ConnectedClient()
+        publisher = MQTTPublisher(settings(), client=client)
+        await publisher.start()
+        return publisher, client
+
+    publisher, client = asyncio.run(run())
+    assert publisher.connected.is_set()
+    assert not any(topic.endswith("/config") for topic, *_ in client.published)
+    publisher.mark_telemetry_ready()
+    assert len([topic for topic, *_ in client.published if topic.endswith("/config")]) == 42
+
+
+def test_mqtt_reconnect_restores_discovery_without_changing_entity_identity() -> None:
+    client = FakeMQTTClient()
+    publisher = MQTTPublisher(settings(), client=client)
+    success = ReasonCode(is_failure=False)
+
+    publisher._on_connect(client, None, None, success, None)
+    assert not any(topic.endswith("/config") for topic, *_ in client.published)
+    publisher.mark_telemetry_ready()
+    assert len([topic for topic, *_ in client.published if topic.endswith("/config")]) == 42
+
+    publisher.mark_telemetry_ready()
+    assert len([topic for topic, *_ in client.published if topic.endswith("/config")]) == 42
+    publisher._on_disconnect(client, None, None, None, None)
+    publisher._on_connect(client, None, None, success, None)
+
+    configs = [
+        (topic, json.loads(payload))
+        for topic, payload, *_ in client.published
+        if topic.endswith("/config")
+    ]
+    assert len(configs) == 84
+    assert len({topic for topic, _ in configs}) == 42
+    assert len({payload["unique_id"] for _, payload in configs}) == 42
 
 
 def test_mqtt_publish_failure_logs_topic(caplog) -> None:
@@ -359,12 +413,18 @@ def test_mqtt_connect_error_includes_exception_type_and_fallback(caplog) -> None
 def test_home_assistant_birth_republishes_retained_discovery() -> None:
     client = FakeMQTTClient()
     publisher = MQTTPublisher(settings(), client=client)
+    publisher._broker_connected = True
 
     class Message:
         topic = "homeassistant/status"
         payload = b"online"
 
     publisher._on_message(client, None, Message())
+    assert not client.published
+    publisher.mark_telemetry_ready()
+    before_birth = len(client.published)
+    publisher._on_message(client, None, Message())
+    assert len(client.published) > before_birth
     assert any(topic == "homeassistant/sensor/BMS-CFE-5100S/pack_1_v_pack/config" for topic, *_ in client.published)
 
 
@@ -372,6 +432,7 @@ def test_graceful_shutdown_publishes_offline_before_disconnect_and_is_idempotent
     async def run():
         client = FakeMQTTClient()
         publisher = MQTTPublisher(settings(), client=client)
+        publisher.mark_telemetry_ready()
         publisher.publish_values({"voltage_v": 52.3, "current_a": -1.2})
         await publisher.graceful_shutdown()
         first_count = len(client.published)

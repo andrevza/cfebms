@@ -6,6 +6,7 @@ import signal
 import time
 
 import cfebms.service as service_module
+from cfebms.mqtt import MQTTPublisher
 from cfebms.service import reconnect_loop, run_service
 from cfebms.config import Settings
 from cfebms.frames import crc16_modbus
@@ -416,6 +417,9 @@ def test_session_does_not_emit_legacy_telemetry_summary_info(caplog) -> None:
     class Publisher:
         connected = asyncio.Event()
 
+        def mark_telemetry_ready(self):
+            pass
+
         def publish_connection(self, connected):
             pass
 
@@ -560,6 +564,10 @@ def test_battery_rtc_is_diagnostic_only_and_updates_health_report() -> None:
     class Publisher:
         def __init__(self):
             self.values = []
+            self.ready_calls = 0
+
+        def mark_telemetry_ready(self):
+            self.ready_calls += 1
 
         def publish_connection(self, connected):
             pass
@@ -590,9 +598,162 @@ def test_battery_rtc_is_diagnostic_only_and_updates_health_report() -> None:
     asyncio.run(run())
 
     assert service._latest_battery_rtc == "2023-11-14T22:13:20+00:00"
+    assert publisher.ready_calls == 1
     assert publisher.values
     assert all("battery_rtc_iso" not in values for values in publisher.values)
     assert all("battery_rtc_raw" not in values for values in publisher.values)
+
+
+def _discovery_recording_publisher():
+    class PublishResult:
+        rc = 0
+
+        def is_published(self):
+            return True
+
+    class Client:
+        def __init__(self):
+            self.published = []
+            self.will = None
+            self.on_connect = None
+            self.on_disconnect = None
+            self.on_message = None
+
+        def will_set(self, *args, **kwargs):
+            self.will = (args, kwargs)
+
+        def publish(self, topic, payload, qos=0, retain=False):
+            self.published.append((topic, payload, qos, retain))
+            return PublishResult()
+
+        def subscribe(self, topic, qos=0):
+            pass
+
+    client = Client()
+    publisher = MQTTPublisher(Settings(battery_host="battery.invalid"), client=client)
+    publisher._on_connect(client, None, None, type("Success", (), {"is_failure": False})(), None)
+    return publisher, client
+
+
+def test_tcp_and_non_summary_frames_do_not_publish_discovery_or_measurements() -> None:
+    invalid_summary = bytearray(_valid_frame(73, voltage=5056, soc=10))
+    invalid_summary[-2] ^= 1
+    frame_sets = (
+        (),
+        (OBSERVED_INITIAL_SEQUENCE,),
+        (_valid_frame(35),),
+        (bytes(invalid_summary),),
+        (_valid_frame(97, voltage=5056),),
+        (OBSERVED_INITIAL_SEQUENCE, _valid_frame(35)),
+    )
+
+    for frames in frame_sets:
+        publisher, client = _discovery_recording_publisher()
+
+        class Reader:
+            def __init__(self):
+                self.chunks = [*frames, b""]
+
+            async def read(self, size):
+                return self.chunks.pop(0)
+
+        class Writer(FakeWriter):
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+        async def run():
+            service = BatteryService(Settings(battery_host="battery.invalid"), publisher)
+            try:
+                await service._session(Reader(), Writer())
+            except ConnectionError:
+                pass
+
+        asyncio.run(run())
+        assert not any(topic.endswith("/config") for topic, *_ in client.published)
+        assert not any(
+            topic.startswith("cfebms/pack_1/") and "/availability/" not in topic
+            for topic, *_ in client.published
+        )
+        assert not any(
+            topic.startswith("cfebms/availability/pack_1_") and payload == "online"
+            for topic, payload, *_ in client.published
+        )
+
+
+def test_first_decoded_summary_triggers_discovery_and_gates_recovery_publication() -> None:
+    publisher, client = _discovery_recording_publisher()
+    summary = _valid_frame(73, voltage=5056, soc=10)
+    pre_summary = [OBSERVED_INITIAL_SEQUENCE, _valid_frame(35), _valid_frame(97, voltage=5056)]
+
+    class Reader:
+        def __init__(self, frames):
+            self.chunks = [*frames, b""]
+            self.pre_summary_events = None
+
+        async def read(self, size):
+            if self.chunks[0] == summary:
+                self.pre_summary_events = list(client.published)
+            return self.chunks.pop(0)
+
+    class Writer(FakeWriter):
+        def __init__(self):
+            super().__init__()
+            self.writes = []
+
+        def write(self, data):
+            self.writes.append(data)
+
+        async def drain(self):
+            pass
+
+    async def run():
+        service = BatteryService(Settings(battery_host="battery.invalid"), publisher)
+        first_reader = Reader([*pre_summary, summary])
+        writer = Writer()
+        try:
+            await service._session(first_reader, writer)
+        except ConnectionError:
+            pass
+        first_pre_summary_events = first_reader.pre_summary_events
+
+        service._on_connection_established()
+        recovery_reader = Reader([_valid_frame(97, voltage=5056), summary])
+        try:
+            await service._session(recovery_reader, Writer())
+        except ConnectionError:
+            pass
+        return service, writer, first_pre_summary_events
+
+    service, writer, first_pre_summary_events = asyncio.run(run())
+    assert first_pre_summary_events is not None
+    assert not any(topic.endswith("/config") for topic, *_ in first_pre_summary_events)
+    assert not any(
+        topic.startswith("cfebms/pack_1/") and "/availability/" not in topic
+        for topic, *_ in first_pre_summary_events
+    )
+    configs = [item for item in client.published if item[0].endswith("/config")]
+    assert len(configs) == 42
+    assert len({item[0] for item in configs}) == 42
+    assert writer.writes == [OBSERVED_INITIAL_SEQUENCE]
+    assert publisher._telemetry_ready
+    assert service._latest_soc == 10
+    assert len([item for item in client.published if item[0].endswith("/config")]) == 42
+
+    measurement_events = [
+        index
+        for index, (topic, *_rest) in enumerate(client.published)
+        if topic.startswith("cfebms/pack_1/") and "/availability/" not in topic
+    ]
+    config_events = [index for index, (topic, *_rest) in enumerate(client.published) if topic.endswith("/config")]
+    assert config_events and measurement_events
+    assert max(config_events) < min(measurement_events)
+    assert ("cfebms/availability/pack_1_soc", "online", 1, True) in client.published
+    assert ("cfebms/availability/pack_1_soc", "offline", 1, True) in client.published
+    assert ("cfebms/connection", "online", 1, True) in client.published
+    assert ("cfebms/connection", "offline", 1, True) in client.published
 
 
 def test_operational_heartbeat_is_degraded_when_telemetry_is_stale(caplog) -> None:
@@ -862,6 +1023,9 @@ def test_continuous_tcp_traffic_survives_multiple_health_reports_and_counts_exac
         def __init__(self):
             self.connected.set()
 
+        def mark_telemetry_ready(self):
+            pass
+
         def publish_connection(self, connected):
             pass
 
@@ -1011,6 +1175,9 @@ def test_frame_counters_are_crc_valid_per_session_and_per_report(caplog) -> None
         def __init__(self):
             self.connected = asyncio.Event()
             self.connected.set()
+
+        def mark_telemetry_ready(self):
+            pass
 
         def publish_connection(self, connected):
             pass

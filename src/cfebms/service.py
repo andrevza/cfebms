@@ -303,6 +303,7 @@ class BatteryService:
         self._last_rx_monotonic = last_rx
         self.publisher.publish_connection(True)
         telemetry_stale = False
+        summary_validated = False
         assembler = FrameAssembler(cfe_frame_length, max_buffer_size=65536)
         first_frame_types: set[str] = set()
         try:
@@ -403,13 +404,16 @@ class BatteryService:
                             first_frame_types.add(frame_type)
                     _LOGGER.debug("RX CFE %s frame length=%d", frame_type, len(frame))
                     telemetry = decode_cfe_telemetry(frame)
+                    if frame_type == "SUMMARY" and telemetry.values and not telemetry.warnings:
+                        summary_validated = True
+                        self.publisher.mark_telemetry_ready()
                     rtc = telemetry.diagnostics.get("battery_rtc_iso")
-                    if isinstance(rtc, str) and rtc:
+                    if summary_validated and isinstance(rtc, str) and rtc:
                         self._latest_battery_rtc = rtc
                     for warning in telemetry.warnings:
                         _LOGGER.warning("CFE %s decode warning (length=%d): %s", frame_type, len(frame), warning or "no details")
                         _LOGGER.debug("CFE parse failure frame length=%d", len(frame))
-                    if telemetry.values:
+                    if telemetry.values and summary_validated:
                         if "soc_percent" in telemetry.values:
                             self._latest_soc = telemetry.values["soc_percent"]
                         if "voltage_v" in telemetry.values:

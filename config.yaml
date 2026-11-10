@@ -1,7 +1,7 @@
 name: "CFE BMS"
 slug: "cfe_bms"
 description: "CFE Battery Management System"
-version: "0.1.6"
+version: "0.1.7"
 url: "https://github.com/andrevza/cfebms"
 startup: application
 boot: auto

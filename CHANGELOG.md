@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.7
+
+- Delay Home Assistant discovery and battery measurement publication until a
+  CRC-valid SUMMARY frame has decoded successfully.
+- Restore retained discovery after MQTT reconnects or Home Assistant birth,
+  keeping sensor availability offline until fresh measurements arrive.
+
 ## 0.1.6
 
 - Add battery RTC diagnostics from SUMMARY and DETAIL frames to periodic health

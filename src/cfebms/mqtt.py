@@ -154,6 +154,9 @@ class MQTTPublisher:
         self._last_seen: dict[str, float] = {}
         self._battery_connected = False
         self._ever_connected = False
+        self._broker_connected = False
+        self._telemetry_ready = False
+        self._discovery_published = False
         self._has_published_telemetry = False
         self._publish_failure_logged = False
         self._shutdown_started = False
@@ -178,20 +181,25 @@ class MQTTPublisher:
         else:
             _LOGGER.info("MQTT connected to broker %s:%d", self.settings.mqtt_host, self.settings.mqtt_port)
         self._ever_connected = True
+        self._broker_connected = True
         if self._loop:
             self._loop.call_soon_threadsafe(self.connected.set)
         client.subscribe(f"{self.settings.discovery_prefix}/status", qos=1)
         self.publish_connection(self._battery_connected)
+        self.mark_all_unavailable()
         self._publish(f"{self.settings.base_topic}/availability", "online", retain=True)
+        if self._telemetry_ready:
+            self.publish_discovery(force=True)
 
     def _on_message(self, client: Any, userdata: Any, message: Any) -> None:
         if message.topic == f"{self.settings.discovery_prefix}/status":
             if message.payload == b"online":
                 _LOGGER.info("Home Assistant MQTT birth received; republishing discovery")
-                self.publish_discovery()
+                self.publish_discovery(force=True)
             return
 
     def _on_disconnect(self, client: Any, userdata: Any, disconnect_flags: Any, reason_code: Any, properties: Any) -> None:
+        self._broker_connected = False
         if self._loop:
             self._loop.call_soon_threadsafe(self.connected.clear)
         disconnect_reason = str(reason_code).strip() if reason_code is not None else ""
@@ -257,7 +265,6 @@ class MQTTPublisher:
                 )
                 self.client.loop_start()
                 await asyncio.wait_for(self.connected.wait(), timeout=10.0)
-                self.publish_discovery()
                 return
             except (OSError, TimeoutError, asyncio.TimeoutError) as exc:
                 detail = str(exc).strip() or "no additional details"
@@ -274,18 +281,31 @@ class MQTTPublisher:
                     except asyncio.TimeoutError:
                         pass
 
-    def publish_discovery(self) -> None:
+    def mark_telemetry_ready(self) -> None:
+        """Enable discovery after the service validates a decoded SUMMARY."""
+        self._telemetry_ready = True
+        self.publish_discovery()
+
+    def publish_discovery(self, *, force: bool = False) -> None:
+        if not self._telemetry_ready or not self._broker_connected:
+            return
+        if self._discovery_published and not force:
+            return
         _LOGGER.info("Publishing Home Assistant discovery for %d entities", len(ENTITY_SPECS))
+        complete = True
         for spec in ENTITY_SPECS:
-            self._publish(
+            published = self._publish(
                 discovery_topic(self.settings.discovery_prefix, spec),
                 json.dumps(discovery_payload(spec, self.settings), separators=(",", ":")),
             )
+            complete = published and complete
             if spec.component == "sensor":
                 self._publish(
                     f"{self.settings.base_topic}/availability/{spec.object_id}",
                     "offline",
                 )
+        if complete:
+            self._discovery_published = True
 
     def publish_connection(self, connected: bool) -> None:
         self._battery_connected = connected
@@ -295,6 +315,9 @@ class MQTTPublisher:
         )
 
     def publish_values(self, values: dict[str, int | float | str], *, now: float | None = None) -> None:
+        if not self._telemetry_ready:
+            _LOGGER.debug("Skipping MQTT measurements until a valid SUMMARY frame is received")
+            return
         now = time.monotonic() if now is None else now
         for key, value in values.items():
             object_id = VALUE_TO_ENTITY.get(key)
@@ -309,8 +332,12 @@ class MQTTPublisher:
                 precision = spec.display_precision or 0
                 payload = f"{float(value) * 1000:.{precision}f}"
             published = self._publish(f"{self.settings.base_topic}/{spec.state_path}", payload)
-            self._publish(f"{self.settings.base_topic}/availability/{object_id}", "online")
-            self._last_seen[object_id] = now
+            if published:
+                self._publish(f"{self.settings.base_topic}/availability/{object_id}", "online")
+                self._last_seen[object_id] = now
+            else:
+                self._publish(f"{self.settings.base_topic}/availability/{object_id}", "offline")
+                self._last_seen.pop(object_id, None)
             if published and not self._has_published_telemetry:
                 _LOGGER.info("First battery telemetry published to MQTT (%d measurement(s))", len(values))
                 self._has_published_telemetry = True
@@ -323,8 +350,9 @@ class MQTTPublisher:
                 del self._last_seen[object_id]
 
     def mark_all_unavailable(self) -> None:
-        for object_id in tuple(self._last_seen):
-            self._publish(f"{self.settings.base_topic}/availability/{object_id}", "offline")
+        for spec in ENTITY_SPECS:
+            if spec.component == "sensor":
+                self._publish(f"{self.settings.base_topic}/availability/{spec.object_id}", "offline")
         self._last_seen.clear()
 
     async def graceful_shutdown(self, *, timeout: float = 5.0) -> None:
