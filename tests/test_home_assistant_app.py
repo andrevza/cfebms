@@ -20,7 +20,8 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
     assert manifest["name"] == "CFE BMS"
     assert manifest["slug"] == "cfe_bms"
     assert manifest["description"] == "CFE Battery Management System"
-    assert manifest["version"] == "0.1.8"
+    assert manifest["version"] == "v0.1.9"
+    assert manifest["image"] == "andrevza/cfebms"
     assert manifest["url"] == "https://github.com/andrevza/cfebms"
     assert {"aarch64", "amd64"}.issubset(manifest["arch"])
 
@@ -75,7 +76,7 @@ def test_build_and_icon_metadata_cover_requested_app_platforms() -> None:
     build = yaml.safe_load((ROOT / "build.yaml").read_text())
     assert set(build["build_from"]) == {"aarch64", "amd64"}
     assert set(build["build_from"].values()) == {
-        "ghcr.io/home-assistant/base-python:3.12-alpine3.24"
+        "ghcr.io/home-assistant/base-python:3.12-alpine3.24@sha256:608cee238b1b779ef6ace48718d116d153b65d2361a2c458b31a9a627b2c4608"
     }
     icon = (ROOT / "icon.png").read_bytes()
     assert icon[:8] == b"\x89PNG\r\n\x1a\n"
@@ -231,7 +232,7 @@ def test_app_docs_and_changelog_cover_options_and_app_versions() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text()
     for option in supervisor.OPTION_ENV:
         assert f"`{option}`" in docs
-    for version in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.8"):
+    for version in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.8", "v0.1.9"):
         assert f"## {version}" in changelog
 
 
@@ -246,20 +247,32 @@ def test_docker_hub_workflow_is_tag_only_and_gates_publish_on_tests() -> None:
     assert jobs["publish"]["needs"] == "test"
     publish_steps = jobs["publish"]["steps"]
     metadata = next(step for step in publish_steps if step.get("id") == "meta")
-    build = next(
+    assert metadata["with"]["images"] == "andrevza/cfebms"
+    assert "latest=false" in metadata["with"]["flavor"]
+    assert "type=semver" not in metadata["with"]["tags"]
+    assert "type=ref,event=tag" in metadata["with"]["tags"]
+    assert (
+        "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
+        in metadata["with"]["labels"]
+    )
+    assert "org.opencontainers.image.licenses=GPL-3.0-only" in metadata["with"]["labels"]
+    build_steps = [
         step
         for step in publish_steps
         if step.get("uses", "").startswith("docker/build-push-action@")
-    )
-
-    assert metadata["with"]["images"] == "${{ vars.DOCKERHUB_USERNAME }}/cfebms"
-    assert "latest=false" in metadata["with"]["flavor"]
-    assert "type=semver,pattern={{version}}" in metadata["with"]["tags"]
-    assert "type=ref,event=tag" in metadata["with"]["tags"]
-    assert "org.opencontainers.image.source=https://github.com/${{ github.repository }}" in metadata["with"]["labels"]
-    assert "org.opencontainers.image.licenses=GPL-3.0-only" in metadata["with"]["labels"]
-    assert build["with"]["platforms"] == "linux/amd64,linux/arm64"
-    assert build["with"]["push"] == "true"
+    ]
+    assert [step["with"]["platforms"] for step in build_steps] == ["linux/amd64", "linux/arm64"]
+    assert [
+        step["with"]["build-args"].split("BUILD_ARCH=")[1].splitlines()[0]
+        for step in build_steps
+    ] == ["amd64", "aarch64"]
+    assert all("push-by-digest=true" in step["with"]["outputs"] for step in build_steps)
+    assert all("tags" not in step["with"] for step in build_steps)
+    assert all("BUILD_VERSION=${{ github.ref_name }}" in step["with"]["build-args"] for step in build_steps)
+    manifest = publish_steps[-1]
+    assert "docker buildx imagetools create" in manifest["run"]
+    assert "$DOCKERHUB_IMAGE@$AMD64_DIGEST" in manifest["run"]
+    assert "$DOCKERHUB_IMAGE@$ARM64_DIGEST" in manifest["run"]
     assert "latest" not in metadata["with"]["tags"]
 
     login = next(
@@ -301,3 +314,13 @@ def test_runtime_container_uses_supervisor_wrapper() -> None:
     assert "USER cfebms" not in dockerfile
     assert 'entrypoint: ["/run.sh"]' in compose
     assert "exec python -m cfebms.supervisor \"$@\"" in run_script
+
+
+def test_prebuilt_image_uses_home_assistant_base_and_arch_labels() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert (
+        "ARG BUILD_FROM=ghcr.io/home-assistant/base-python:3.12-alpine3.24"
+        "@sha256:608cee238b1b779ef6ace48718d116d153b65d2361a2c458b31a9a627b2c4608"
+    ) in dockerfile
+    assert 'io.hass.arch="${BUILD_ARCH}"' in dockerfile
+    assert 'io.hass.version="${BUILD_VERSION}"' in dockerfile

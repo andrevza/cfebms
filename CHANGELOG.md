@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.9
+
+- Switch the Home Assistant App to the prebuilt `andrevza/cfebms` Docker Hub
+  image; Supervisor pulls the exact `v`-prefixed App version instead of
+  building on the Home Assistant host.
+- Build the production image from the pinned Home Assistant Python Alpine base
+  and retain its `/init` entrypoint and Supervisor options handling.
+- Publish amd64 and arm64 platform images under one `v0.1.9` multi-platform
+  tag, with Home Assistant architecture labels (`amd64` and `aarch64`) and
+  release build identity metadata.
+- Preserve existing App options, MQTT behavior, discovery, and entity IDs.
+
 ## 0.1.8
 
 - Report startup build identity, including the App version, Git revision and

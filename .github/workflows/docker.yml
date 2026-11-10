@@ -21,8 +21,7 @@ jobs:
         shell: bash
         run: |
           app_version=$(sed -n 's/^version: "\([^"]*\)"/\1/p' config.yaml)
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [[ -z "$app_version" || "$tag_version" != "$app_version" ]]; then
+          if [[ -z "$app_version" || "$GITHUB_REF_NAME" != "$app_version" ]]; then
             echo "Release tag $GITHUB_REF_NAME must match config.yaml version $app_version" >&2
             exit 1
           fi
@@ -54,14 +53,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6.2.0
         with:
-          images: ${{ vars.DOCKERHUB_USERNAME }}/cfebms
+          images: andrevza/cfebms
           flavor: |
             latest=false
           tags: |
-            type=semver,pattern={{version}}
             type=ref,event=tag
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=GPL-3.0-only
 
       - name: Log in to Docker Hub
@@ -70,19 +70,56 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push multi-platform image
+      - name: Build and push amd64 image for manifest assembly
+        id: build-amd64
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
           target: runtime
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: linux/amd64
+          outputs: type=image,name=andrevza/cfebms,push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BUILD_VERSION=${{ steps.meta.outputs.version }}
+            BUILD_FROM=ghcr.io/home-assistant/base-python:3.12-alpine3.24@sha256:608cee238b1b779ef6ace48718d116d153b65d2361a2c458b31a9a627b2c4608
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_ARCH=amd64
             BUILD_GIT_SHA=${{ github.sha }}
             BUILD_TIMESTAMP=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
             BUILD_SOURCE_STATE=clean
-          cache-from: type=gha,scope=cfebms
-          cache-to: type=gha,mode=max,scope=cfebms
+          cache-from: type=gha,scope=cfebms-amd64
+          cache-to: type=gha,mode=max,scope=cfebms-amd64
+
+      - name: Build and push arm64 image for manifest assembly
+        id: build-arm64
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          target: runtime
+          platforms: linux/arm64
+          outputs: type=image,name=andrevza/cfebms,push-by-digest=true,name-canonical=true,push=true
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_FROM=ghcr.io/home-assistant/base-python:3.12-alpine3.24@sha256:608cee238b1b779ef6ace48718d116d153b65d2361a2c458b31a9a627b2c4608
+            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_ARCH=aarch64
+            BUILD_GIT_SHA=${{ github.sha }}
+            BUILD_TIMESTAMP=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            BUILD_SOURCE_STATE=clean
+          cache-from: type=gha,scope=cfebms-arm64
+          cache-to: type=gha,mode=max,scope=cfebms-arm64
+
+      - name: Create and verify multi-platform release tag
+        env:
+          DOCKERHUB_IMAGE: andrevza/cfebms
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          AMD64_DIGEST: ${{ steps.build-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ steps.build-arm64.outputs.digest }}
+        shell: bash
+        run: |
+          docker buildx imagetools create \
+            --tag "$RELEASE_IMAGE_TAGS" \
+            "$DOCKERHUB_IMAGE@$AMD64_DIGEST" \
+            "$DOCKERHUB_IMAGE@$ARM64_DIGEST"
+          manifest=$(docker buildx imagetools inspect --raw "$DOCKERHUB_IMAGE:$RELEASE_TAG")
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]' <<< "$manifest"

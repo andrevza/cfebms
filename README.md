@@ -26,9 +26,10 @@ MQTT discovery enabled.
 
 Add `https://github.com/andrevza/cfebms` under **Settings → Apps → App store →
 ⋮ → Repositories**, install **CFE BMS**, and configure the battery endpoint and
-MQTT broker in the App configuration. The App package targets `aarch64` and
-`amd64`. The repository must be available on GitHub for Supervisor to install
-it; installation in a live Supervisor instance has not yet been verified.
+MQTT broker in the App configuration. The App pulls a prebuilt image from
+`andrevza/cfebms`; Home Assistant does not compile the App on the Raspberry Pi.
+The App supports `aarch64` and `amd64`. Its `config.yaml` version is the exact
+Docker tag Supervisor pulls, including the `v` prefix.
 
 ## Standalone Docker Compose
 
@@ -51,18 +52,19 @@ the Home Assistant App at the same time; they share an MQTT device identity.
 ## Docker Hub images
 
 Release images are built and published to Docker Hub only when a `v*` Git tag
-is pushed. Before tagging, set the Home Assistant App version in `config.yaml`
-to the same version as the tag (for example, `0.1.9` and `v0.1.9`). The workflow
-runs the Docker test suite first, verifies that version match, then builds and
-publishes `linux/amd64` and `linux/arm64` images. Each release gets both
-`<version>` and `v<version>` tags; it does not create or update `latest`.
+is pushed. The App version in `config.yaml` must exactly match that tag, for
+example `version: "v0.1.9"`; `image: "andrevza/cfebms"` contains no tag. The
+workflow runs the Docker test suite first, builds `linux/amd64` and
+`linux/arm64`, then combines them under the single tag `v0.1.9`. The image uses
+the Home Assistant Python base image and supplies Supervisor's `/init`
+entrypoint. It does not publish unprefixed version tags or `latest`.
 
 To release, update `config.yaml` to the intended App version, commit and merge
 that change to `main`, then push the matching Git tag. For example:
 
 ```sh
 git switch main
-# Set config.yaml to version: "0.1.9" and commit the release change.
+# Set config.yaml to version: "v0.1.9" and commit the release change.
 git tag v0.1.9
 git push origin main
 git push origin v0.1.9
@@ -81,12 +83,12 @@ Configure these repository Actions settings before the first release:
 After a release tag is pushed, pull the versioned image with:
 
 ```sh
-export DOCKERHUB_USERNAME=your-dockerhub-username
-docker pull "$DOCKERHUB_USERNAME/cfebms:0.1.9"
+docker pull andrevza/cfebms:v0.1.9
 ```
 
-Docker selects the matching platform image automatically. Raspberry Pi devices
-need a 64-bit OS to use the `linux/arm64` image.
+Docker and Supervisor select the matching platform image automatically. The
+Docker `arm64` variant carries Home Assistant's `aarch64` architecture label.
+Raspberry Pi devices need a 64-bit OS to use it.
 
 ## Development
 
@@ -98,12 +100,11 @@ docker compose run --build --rm test
 ```
 
 Build the standalone service image with `scripts/docker-build.sh` to embed the
-current Git revision and whether the working tree is dirty. Ordinary Docker or
-Supervisor builds without a supplied revision log `Git commit: unknown`;
-Supervisor supplies the App version from `config.yaml`, while the image build
-records its UTC construction time. The startup identity is printed once at INFO
-level before MQTT connection attempts. Check it in Home Assistant under the App's
-logs. The Python package version is separate from the Home Assistant App version.
+current Git revision and whether the working tree is dirty. Release images embed
+the release commit, exact `v`-prefixed App version, and UTC build timestamp. The
+startup identity is printed once at INFO level before MQTT connection attempts.
+Check it in Home Assistant under the App's logs. The Python package version is
+separate from the Home Assistant App version.
 For dirty local builds, the log says `Source state: dirty`; that identifies that
 the source differs from HEAD but does not describe those modifications.
 

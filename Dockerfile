@@ -1,4 +1,4 @@
-ARG BUILD_FROM=python:3.12-slim
+ARG BUILD_FROM=ghcr.io/home-assistant/base-python:3.12-alpine3.24@sha256:608cee238b1b779ef6ace48718d116d153b65d2361a2c458b31a9a627b2c4608
 FROM ${BUILD_FROM} AS base
 
 ARG BUILD_VERSION=unknown

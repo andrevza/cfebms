@@ -12,6 +12,11 @@ The currently supported battery target is the CFE-5100S.
 4. Configure the MQTT broker and battery connection below, then save and start
    the App.
 
+Home Assistant pulls the prebuilt `andrevza/cfebms` image from Docker Hub; it
+does not compile the App on the Home Assistant host. Published App versions
+use matching `v`-prefixed image tags, such as `v0.1.9`. Configuration options,
+MQTT discovery, and entity identifiers are unchanged by the image source.
+
 ## Configuration
 
 The App presents six connection settings by default. Advanced
