@@ -37,6 +37,7 @@ class Settings:
     read_timeout: float = 10.0
     reconnect_delay: float = 5.0
     stale_after: float = 30.0
+    telemetry_stale_after: float = 300.0
     mqtt_host: str = "mqtt.example.com"
     mqtt_port: int = 1883
     mqtt_username: str | None = None
@@ -79,6 +80,7 @@ class Settings:
             read_timeout=_float_env("CFE_READ_TIMEOUT", 10.0),
             reconnect_delay=_float_env("CFE_RECONNECT_DELAY", 5.0),
             stale_after=_float_env("CFE_STALE_AFTER", 30.0),
+            telemetry_stale_after=_float_env("CFE_TELEMETRY_STALE_AFTER", 300.0),
             mqtt_host=mqtt_host,
             mqtt_port=mqtt_port,
             mqtt_username=username,

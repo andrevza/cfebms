@@ -14,7 +14,7 @@ The currently supported battery target is the CFE-5100S.
 
 Home Assistant pulls the prebuilt `andrevza/cfebms` image from Docker Hub; it
 does not compile the App on the Home Assistant host. Published App versions
-use matching `v`-prefixed image tags, such as `v0.1.9`. Configuration options,
+use matching `v`-prefixed image tags, such as `v0.1.10`. Configuration options,
 MQTT discovery, and entity identifiers are unchanged by the image source.
 
 ## Configuration
@@ -53,6 +53,7 @@ topic namespace.
 | `cfe_read_timeout` | Maximum wait for incoming TCP data before the read operation times out. | No | Optional number, 0.1–86400 seconds | Python: `10.0` seconds. |
 | `cfe_reconnect_delay` | Delay before retrying a failed battery connection. | No | Optional number, 0.1–86400 seconds | Python: `5.0` seconds. |
 | `cfe_stale_after` | Time without battery TCP data before the connection is considered stale. | No | Optional number, 0.1–86400 seconds | Python: `30.0` seconds. |
+| `cfe_telemetry_stale_after` | Time without a fresh decoded telemetry value before its Home Assistant entity is marked unavailable. | No | Optional number, 0.1–86400 seconds | Python: `300.0` seconds. |
 
 ### Logging and diagnostics
 
@@ -93,6 +94,7 @@ defaults.
 ```yaml
 cfe_connect_timeout: 8.0
 cfe_reconnect_delay: 10.0
+cfe_telemetry_stale_after: 300.0
 mqtt_discovery_prefix: homeassistant
 log_level: DEBUG
 heartbeat_log_interval_min: 0
@@ -108,6 +110,10 @@ heartbeat_log_interval_min: 0
 - If MQTT does not connect, check the broker address, port and credentials. The
   Home Assistant MQTT integration and its discovery prefix must be configured
   for the same broker.
+- The **Battery Connection** entity follows the TCP connection immediately.
+  Measurement entities retain their current availability during short battery
+  reconnects and become unavailable only after `cfe_telemetry_stale_after`
+  elapses without a fresh value.
 - If readings become unavailable, check the battery TCP connection and logs
   for stale telemetry reports.
 

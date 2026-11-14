@@ -53,25 +53,16 @@ the Home Assistant App at the same time; they share an MQTT device identity.
 
 Release images are built and published to Docker Hub only when a `v*` Git tag
 is pushed. The App version in `config.yaml` must exactly match that tag, for
-example `version: "v0.1.9"`; `image: "andrevza/cfebms"` contains no tag. The
+example `version: "v0.1.10"`; `image: "andrevza/cfebms"` contains no tag. The
 workflow runs the Docker test suite first, builds `linux/amd64` and
-`linux/arm64`, then combines them under the single tag `v0.1.9`. The image uses
+`linux/arm64`, then combines them under the single tag `v0.1.10`. The image uses
 the Home Assistant Python base image and supplies Supervisor's `/init`
 entrypoint. It does not publish unprefixed version tags or `latest`.
 
-To release, update `config.yaml` to the intended App version, commit and merge
-that change to `main`, then push the matching Git tag. For example:
-
-```sh
-git switch main
-# Set config.yaml to version: "v0.1.9" and commit the release change.
-git tag v0.1.9
-git push origin main
-git push origin v0.1.9
-```
-
-The tag push starts the test and image publishing workflow. Check the GitHub
-Actions run before pulling the new image.
+For the full release checklist, version and changelog rules, safe Git commands,
+and post-publication verification, follow the [release guide](docs/RELEASING.md).
+Pushing the matching tag starts the test and image publishing workflow. Check
+the GitHub Actions run and Docker Hub image before updating Home Assistant.
 
 Configure these repository Actions settings before the first release:
 
@@ -83,7 +74,7 @@ Configure these repository Actions settings before the first release:
 After a release tag is pushed, pull the versioned image with:
 
 ```sh
-docker pull andrevza/cfebms:v0.1.9
+docker pull andrevza/cfebms:v0.1.10
 ```
 
 Docker and Supervisor select the matching platform image automatically. The

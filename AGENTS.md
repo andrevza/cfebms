@@ -41,6 +41,13 @@
 
 ## Changes and evidence
 
+- For any requested release, follow the authoritative procedure in
+  `docs/RELEASING.md`. Do not create release tags or publish images during
+  ordinary development.
+- When adding or renaming an option in `config.yaml`, add or update its
+  user-facing `name` and `description` in `translations/en.yaml`. Keep the
+  translation keys in sync with the manifest schema; the configuration
+  translation test enforces this.
 - Update `docs/PROTOCOL.md` and `docs/OPEN_QUESTIONS.md` as evidence changes.
 - Add deterministic offline tests for every implemented parser/decoder
   behavior. Prefer sanitized binary fixtures with provenance notes.

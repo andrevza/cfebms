@@ -13,6 +13,7 @@ def test_settings_load_runtime_values_from_environment(monkeypatch) -> None:
     assert settings.battery_host == "battery.example"
     assert settings.battery_port == 6868
     assert settings.discovery_prefix == "homeassistant"
+    assert settings.telemetry_stale_after == 300.0
 
 
 def test_settings_require_battery_host(monkeypatch) -> None:

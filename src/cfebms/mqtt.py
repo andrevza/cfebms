@@ -180,13 +180,15 @@ class MQTTPublisher:
             _LOGGER.info("MQTT reconnected to broker %s:%d", self.settings.mqtt_host, self.settings.mqtt_port)
         else:
             _LOGGER.info("MQTT connected to broker %s:%d", self.settings.mqtt_host, self.settings.mqtt_port)
+        first_connection = not self._ever_connected
         self._ever_connected = True
         self._broker_connected = True
         if self._loop:
             self._loop.call_soon_threadsafe(self.connected.set)
         client.subscribe(f"{self.settings.discovery_prefix}/status", qos=1)
         self.publish_connection(self._battery_connected)
-        self.mark_all_unavailable()
+        if first_connection:
+            self.mark_all_unavailable()
         self._publish(f"{self.settings.base_topic}/availability", "online", retain=True)
         if self._telemetry_ready:
             self.publish_discovery(force=True)
@@ -291,6 +293,7 @@ class MQTTPublisher:
             return
         if self._discovery_published and not force:
             return
+        mark_entities_unavailable = not self._discovery_published
         _LOGGER.info("Publishing Home Assistant discovery for %d entities", len(ENTITY_SPECS))
         complete = True
         for spec in ENTITY_SPECS:
@@ -299,7 +302,7 @@ class MQTTPublisher:
                 json.dumps(discovery_payload(spec, self.settings), separators=(",", ":")),
             )
             complete = published and complete
-            if spec.component == "sensor":
+            if spec.component == "sensor" and mark_entities_unavailable:
                 self._publish(
                     f"{self.settings.base_topic}/availability/{spec.object_id}",
                     "offline",

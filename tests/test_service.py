@@ -777,8 +777,9 @@ def test_operational_heartbeat_is_degraded_when_telemetry_is_stale(caplog) -> No
     deadline = service._next_heartbeat_deadline
     assert deadline is not None
     service._last_rx_monotonic = deadline
-    service._last_valid_telemetry_monotonic = deadline - service.settings.stale_after - 1
-    service._session_last_valid_telemetry_monotonic = deadline - service.settings.stale_after - 1
+    stale_telemetry_at = deadline - service.settings.telemetry_stale_after - 1
+    service._last_valid_telemetry_monotonic = stale_telemetry_at
+    service._session_last_valid_telemetry_monotonic = stale_telemetry_at
 
     with caplog.at_level(logging.INFO):
         service.log_periodic_info(now=deadline)
@@ -1495,7 +1496,12 @@ def test_valid_heartbeat_traffic_keeps_tcp_session_without_fresh_telemetry(caplo
 
     async def run():
         service = BatteryService(
-            Settings(battery_host="battery.invalid", stale_after=0.03, read_timeout=1), Publisher()
+            Settings(
+                battery_host="battery.invalid",
+                stale_after=0.03,
+                telemetry_stale_after=0.03,
+                read_timeout=1,
+            ), Publisher()
         )
         service._last_valid_telemetry_monotonic = time.monotonic() - 69.8
         service._latest_soc = 61
@@ -1586,7 +1592,12 @@ def test_stale_tcp_then_reconnect_resets_telemetry_freshness_and_recovers(caplog
 
     publisher = Publisher()
     service = BatteryService(
-        Settings(battery_host="battery.invalid", stale_after=0.05, read_timeout=0.2),
+        Settings(
+            battery_host="battery.invalid",
+            stale_after=0.05,
+            telemetry_stale_after=60.0,
+            read_timeout=0.2,
+        ),
         publisher,
     )
     previous_summary = _valid_frame(73, voltage=5150, soc=77)
@@ -1646,15 +1657,15 @@ def test_stale_tcp_then_reconnect_resets_telemetry_freshness_and_recovers(caplog
     assert reconnect_warnings == []
     assert reader.awaiting_health == "degraded"
     assert reader.awaiting_history == (77, 51.5, "2026-11-10T10:00:00+00:00")
-    assert reader.awaiting_availability is False
+    assert reader.awaiting_availability is True
     assert writer.writes == [OBSERVED_INITIAL_SEQUENCE]
     assert service._latest_soc == 10
     assert service._latest_voltage == 50.56
-    assert publisher.telemetry_available is False  # session end marks it unavailable again
+    assert publisher.telemetry_available is True  # session end preserves fresh telemetry
     assert ("telemetry", True) in publisher.availability_transitions
     assert messages.count("Battery telemetry recovered after battery reconnection") == 1
     assert messages.count("Battery telemetry recovered after stale interval") == 0
-    assert "Battery telemetry stale: no decoded measurements" in caplog.text
+    assert "Battery telemetry stale: no decoded measurements" not in caplog.text
 
 
 def test_shutdown_during_stale_recovery_does_not_reconnect() -> None:

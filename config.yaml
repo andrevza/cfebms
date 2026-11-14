@@ -1,7 +1,7 @@
 name: "CFE BMS"
 slug: "cfe_bms"
 description: "CFE Battery Management System"
-version: "v0.1.9"
+version: "v0.1.10"
 image: "andrevza/cfebms"
 url: "https://github.com/andrevza/cfebms"
 startup: application
@@ -24,6 +24,7 @@ schema:
   cfe_read_timeout: "float(0.1,86400)?"
   cfe_reconnect_delay: "float(0.1,86400)?"
   cfe_stale_after: "float(0.1,86400)?"
+  cfe_telemetry_stale_after: "float(0.1,86400)?"
   mqtt_host: str
   mqtt_port: "int(1,65535)"
   mqtt_username: "str?"

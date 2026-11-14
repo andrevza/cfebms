@@ -176,8 +176,17 @@ class BatteryService:
             stop=self.stop,
             retry_delay=self.settings.reconnect_delay,
             on_connected=self._on_connection_established,
-            on_periodic_info=self.log_periodic_info,
+            on_periodic_info=self._periodic_maintenance,
         )
+
+    def _periodic_maintenance(self) -> None:
+        """Expire stale telemetry while reconnect attempts are in progress."""
+        now = time.monotonic()
+        self.publisher.mark_stale(
+            stale_after=self.settings.telemetry_stale_after,
+            now=now,
+        )
+        self.log_periodic_info(now)
 
     def _reset_operational_counters(self, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
@@ -238,7 +247,8 @@ class BatteryService:
         mqtt_connected = self.publisher.connected.is_set()
         telemetry_fresh = (
             self._session_last_valid_telemetry_monotonic is not None
-            and now - self._session_last_valid_telemetry_monotonic < self.settings.stale_after
+            and now - self._session_last_valid_telemetry_monotonic
+            < self.settings.telemetry_stale_after
         )
         if not battery_connected or tcp_stale or not mqtt_connected:
             overall = "unhealthy"
@@ -318,7 +328,9 @@ class BatteryService:
                 self.log_periodic_info(now)
                 tcp_remaining = self.settings.stale_after - (now - last_rx)
                 if tcp_remaining <= 0:
-                    self.publisher.mark_stale(stale_after=self.settings.stale_after, now=now)
+                    self.publisher.mark_stale(
+                        stale_after=self.settings.telemetry_stale_after, now=now
+                    )
                     self._log_session_timing("stale TCP session")
                     _LOGGER.warning(
                         "Battery connection stale: no TCP data received for %.1f seconds",
@@ -330,7 +342,7 @@ class BatteryService:
                     )
 
                 read_timeout = min(self.settings.read_timeout, tcp_remaining)
-                telemetry_remaining = self.settings.stale_after - (now - last_telemetry)
+                telemetry_remaining = self.settings.telemetry_stale_after - (now - last_telemetry)
                 if not telemetry_stale:
                     if telemetry_remaining <= 0:
                         _LOGGER.warning(
@@ -345,8 +357,13 @@ class BatteryService:
                     chunk = await asyncio.wait_for(reader.read(4096), timeout=read_timeout)
                 except asyncio.TimeoutError:
                     now = time.monotonic()
-                    self.publisher.mark_stale(stale_after=self.settings.stale_after, now=now)
-                    if not telemetry_stale and now - last_telemetry >= self.settings.stale_after:
+                    self.publisher.mark_stale(
+                        stale_after=self.settings.telemetry_stale_after, now=now
+                    )
+                    if (
+                        not telemetry_stale
+                        and now - last_telemetry >= self.settings.telemetry_stale_after
+                    ):
                         _LOGGER.warning(
                             "Battery telemetry stale: no decoded measurements for %.1f seconds",
                             now - last_telemetry,
@@ -368,8 +385,13 @@ class BatteryService:
                     raise ConnectionError("battery closed the TCP stream")
                 last_rx = time.monotonic()
                 self._last_rx_monotonic = last_rx
-                self.publisher.mark_stale(stale_after=self.settings.stale_after, now=last_rx)
-                if not telemetry_stale and last_rx - last_telemetry >= self.settings.stale_after:
+                self.publisher.mark_stale(
+                    stale_after=self.settings.telemetry_stale_after, now=last_rx
+                )
+                if (
+                    not telemetry_stale
+                    and last_rx - last_telemetry >= self.settings.telemetry_stale_after
+                ):
                     _LOGGER.warning(
                         "Battery telemetry stale: no decoded measurements for %.1f seconds",
                         last_rx - last_telemetry,
@@ -469,7 +491,6 @@ class BatteryService:
                 self._shutdown_disconnect_logged = True
             if not self.stop.is_set():
                 self.publisher.publish_connection(False)
-                self.publisher.mark_all_unavailable()
             if self._last_valid_telemetry_monotonic is not None:
                 self._telemetry_recovery_pending = True
 

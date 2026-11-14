@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.10 — 2026-11-14
+
+### Added
+
+- Add `cfe_telemetry_stale_after` to control when Home Assistant measurement
+  entities become unavailable, with a five-minute default independent of the
+  battery TCP connection timeout.
+- Document the permanent release and Docker publication procedure.
+
+### Changed
+
+- Separate Home Assistant telemetry freshness from the battery TCP connection
+  timeout. Keep measurement entities available during short battery reconnects
+  and expire each entity only after its telemetry freshness window; **Battery
+  Connection** still reports TCP loss and recovery immediately.
+
 ## v0.1.9
 
 - Switch the Home Assistant App to the prebuilt `andrevza/cfebms` Docker Hub

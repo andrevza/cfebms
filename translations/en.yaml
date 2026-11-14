@@ -23,6 +23,10 @@ configuration:
     name: "Stale connection timeout"
     description: "Maximum time without battery TCP data before the session is marked stale and reconnected (0.1–86400 seconds; default 30)."
 
+  cfe_telemetry_stale_after:
+    name: "Telemetry stale timeout"
+    description: "Time without a fresh battery measurement before its Home Assistant entity becomes unavailable (0.1–86400 seconds; default 300)."
+
   mqtt_host:
     name: "MQTT host"
     description: "Hostname or IP address of your MQTT broker."

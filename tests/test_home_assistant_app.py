@@ -20,7 +20,7 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
     assert manifest["name"] == "CFE BMS"
     assert manifest["slug"] == "cfe_bms"
     assert manifest["description"] == "CFE Battery Management System"
-    assert manifest["version"] == "v0.1.9"
+    assert manifest["version"] == "v0.1.10"
     assert manifest["image"] == "andrevza/cfebms"
     assert manifest["url"] == "https://github.com/andrevza/cfebms"
     assert {"aarch64", "amd64"}.issubset(manifest["arch"])
@@ -43,6 +43,7 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
         "CFE_READ_TIMEOUT",
         "CFE_RECONNECT_DELAY",
         "CFE_STALE_AFTER",
+        "CFE_TELEMETRY_STALE_AFTER",
         "MQTT_HOST",
         "MQTT_PORT",
         "MQTT_USERNAME",
@@ -57,6 +58,7 @@ def test_app_manifest_declares_supported_platforms_and_current_settings() -> Non
     assert manifest["schema"]["cfe_read_timeout"].endswith("?")
     assert manifest["schema"]["cfe_reconnect_delay"].endswith("?")
     assert manifest["schema"]["cfe_stale_after"].endswith("?")
+    assert manifest["schema"]["cfe_telemetry_stale_after"].endswith("?")
     assert manifest["schema"]["mqtt_username"] == "str?"
     assert manifest["schema"]["mqtt_discovery_prefix"] == "str?"
     assert manifest["schema"]["mqtt_base_topic"] == "str?"
@@ -152,6 +154,7 @@ def test_minimal_app_options_keep_omitted_advanced_python_defaults(monkeypatch) 
     assert settings.read_timeout == 10.0
     assert settings.reconnect_delay == 5.0
     assert settings.stale_after == 30.0
+    assert settings.telemetry_stale_after == 300.0
     assert settings.discovery_prefix == "homeassistant"
     assert settings.base_topic == "cfebms"
     assert settings.log_level == "INFO"
@@ -193,6 +196,7 @@ def test_optional_saved_advanced_app_options_override_python_defaults(monkeypatc
             "cfe_read_timeout": 12.0,
             "cfe_reconnect_delay": 7.0,
             "cfe_stale_after": 45.0,
+            "cfe_telemetry_stale_after": 120.0,
             "mqtt_discovery_prefix": "ha_custom",
             "mqtt_base_topic": "battery/cfe",
             "log_level": "DEBUG",
@@ -206,6 +210,7 @@ def test_optional_saved_advanced_app_options_override_python_defaults(monkeypatc
     assert settings.read_timeout == 12.0
     assert settings.reconnect_delay == 7.0
     assert settings.stale_after == 45.0
+    assert settings.telemetry_stale_after == 120.0
     assert settings.discovery_prefix == "ha_custom"
     assert settings.base_topic == "battery/cfe"
     assert settings.log_level == "DEBUG"
@@ -230,8 +235,12 @@ def test_invalid_advanced_option_keeps_clear_python_validation(monkeypatch) -> N
 def test_app_docs_and_changelog_cover_options_and_app_versions() -> None:
     docs = (ROOT / "DOCS.md").read_text()
     changelog = (ROOT / "CHANGELOG.md").read_text()
+    app_version = yaml.safe_load((ROOT / "config.yaml").read_text())["version"]
     for option in supervisor.OPTION_ENV:
         assert f"`{option}`" in docs
+    assert f"## {app_version} — " in changelog
+    assert "## Unreleased" not in changelog
+    assert "## v0.1.9" in changelog
     for version in ("0.1.0", "0.1.1", "0.1.2", "0.1.3", "0.1.8", "v0.1.9"):
         assert f"## {version}" in changelog
 
